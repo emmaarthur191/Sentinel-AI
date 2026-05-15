@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -13,8 +13,8 @@ RUN useradd -m appuser && chown -R appuser /app
 USER appuser
 ENV PATH="/home/appuser/.local/bin:${PATH}"
 
-COPY --chown=appuser:appuser requirements-api.txt .
-RUN pip install --no-cache-dir --user -r requirements-api.txt
+COPY --chown=appuser:appuser requirements.txt .
+RUN pip install --no-cache-dir --user -r requirements.txt
 
 COPY --chown=appuser:appuser api.py .
 
