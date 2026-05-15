@@ -16,6 +16,7 @@ except ImportError:
         import openvino as ov
     except ImportError:
         ov = None
+import cv2
 import logging
 import datetime
 
@@ -86,23 +87,30 @@ class GradCam:
 
     def generate_heatmap(self, input_tensor, class_idx):
         try:
-            output = self.model(input_tensor)
-            self.model.zero_grad()
-            loss = output[0, class_idx]
-            loss.backward()
+            # Ensure gradients are enabled for this specific pass
+            with torch.enable_grad():
+                input_tensor.requires_grad = True
+                output = self.model(input_tensor)
+                self.model.zero_grad()
+                loss = output[0, class_idx]
+                loss.backward()
+                
+                if self.gradients is None or self.activations is None:
+                    logger.error("Hooks failed to capture gradients/activations")
+                    return None
 
-            gradients = self.gradients.data.cpu().numpy()
-            activations = self.activations.data.cpu().numpy()
-            
-            weights = np.mean(gradients, axis=(2, 3))[0]
-            heatmap = np.zeros(activations.shape[2:], dtype=np.float32)
+                gradients = self.gradients.data.cpu().numpy()
+                activations = self.activations.data.cpu().numpy()
+                
+                weights = np.mean(gradients, axis=(2, 3))[0]
+                heatmap = np.zeros(activations.shape[2:], dtype=np.float32)
 
-            for i, w in enumerate(weights):
-                heatmap += w * activations[0, i, :, :]
+                for i, w in enumerate(weights):
+                    heatmap += w * activations[0, i, :, :]
 
-            heatmap = np.maximum(heatmap, 0)
-            heatmap /= np.max(heatmap) if np.max(heatmap) > 0 else 1
-            return heatmap
+                heatmap = np.maximum(heatmap, 0)
+                heatmap /= np.max(heatmap) if np.max(heatmap) > 0 else 1
+                return heatmap
         except Exception as e:
             logger.error(f"Heatmap generation failed: {e}")
             return None
@@ -251,7 +259,6 @@ with col2:
                             
                             if heatmap is not None:
                                 # Apply heatmap to image
-                                import cv2
                                 original_np = np.array(image.resize((224, 224)))
                                 heatmap_resized = cv2.resize(heatmap, (224, 224))
                                 heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
