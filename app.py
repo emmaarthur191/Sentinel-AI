@@ -154,21 +154,34 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ===================== ENGINE HELPERS =====================
-def preprocess_numpy(image_bytes, enhance=False):
-    """Preprocess image bytes into normalized NumPy tensor for inference."""
-    img_pil = Image.open(io.BytesIO(image_bytes)).convert('L')
-    img_np = np.array(img_pil)
+
+# Training-matched preprocessing pipeline (Resize 256 -> CenterCrop 224)
+_inference_transform = transforms.Compose([
+    transforms.Resize((256, 256)),
+    transforms.CenterCrop(224),
+    transforms.ToTensor(),
+    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+])
+
+def preprocess_for_inference(image_bytes, enhance=False):
+    """Preprocess image bytes using the EXACT training validation pipeline.
+
+    Critical: Must use RGB + Resize(256) + CenterCrop(224) to match training.
+    The old grayscale->RGB path caused false positives on normal X-rays.
+    """
+    img_pil = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+
     if enhance:
+        img_np = np.array(img_pil)
+        # Apply CLAHE on luminance channel only
+        lab = cv2.cvtColor(img_np, cv2.COLOR_RGB2LAB)
         clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-        img_np = clahe.apply(img_np)
-    img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
-    img_resized = cv2.resize(img_rgb, (224, 224))
-    img_norm = img_resized.astype(np.float32) / 255.0
-    mean = np.array([0.485, 0.456, 0.406])
-    std = np.array([0.229, 0.224, 0.225])
-    img_norm = (img_norm - mean) / std
-    img_final = img_norm.transpose(2, 0, 1)
-    return np.expand_dims(img_final, 0)
+        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
+        img_np = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
+        img_pil = Image.fromarray(img_np)
+
+    tensor = _inference_transform(img_pil)
+    return tensor.unsqueeze(0).numpy()
 
 def _generate_narrative(image_bytes, prediction, confidence):
     """Deterministic clinical narrative seeded by image hash."""
@@ -195,7 +208,7 @@ def _predict_openvino(image_bytes, enhance=False):
     if engine is None:
         return None
 
-    input_orig = preprocess_numpy(image_bytes, enhance=enhance)
+    input_orig = preprocess_for_inference(image_bytes, enhance=enhance)
     input_flip = np.flip(input_orig, axis=3).copy()
 
     res_orig = engine([input_orig])[engine.output(0)]
