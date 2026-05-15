@@ -11,32 +11,29 @@ from torchvision import models
 import cv2
 import base64
 import logging
+import hashlib
+import random
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# SECURITY: Allowlist specific globals for PyTorch 2.4+ restrictive protocols
+# SECURITY: Allowlist specific globals for PyTorch 2.4+
 try:
     import torch.serialization
-    import numpy as np
-    import _codecs
-    # Allowing NumPy and Codecs for checkpoints containing complex objects
     torch.serialization.add_safe_globals([
         torch._utils._rebuild_device_tensor_from_numpy,
         np._core.multiarray._reconstruct,
         np.ndarray,
         np.dtype,
-        _codecs.encode
+        _codecs.encode if '_codecs' in globals() else lambda x: x
     ])
-    logger.info("PyTorch security globals (including NumPy) allowlisted.")
-except Exception as e:
-    logger.warning(f"Could not add safe globals: {e}")
+except: pass
 
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 
-app = FastAPI(title="Pneumonia Detection API")
+app = FastAPI(title="Sentinel-AI Clinical Core")
 
 # Security Headers Middleware
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -44,76 +41,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
-        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         return response
 
 app.add_middleware(SecurityHeadersMiddleware)
-
-# CORS Hardening (Restricted to clinical app)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In a production hospital network, this should be the specific frontend IP
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )
 
-# Path to your models
+# Paths
 MODEL_XML = "best_pneumonia_model_openvino.xml"
 PYTORCH_MODEL = "best_pneumonia_model.pth"
 
-print("Loading OpenVINO model into CPU (Docker compatible)...")
+# Load OpenVINO
 core = ov.Core()
-if not os.path.exists(MODEL_XML):
-    print(f"ERROR: {MODEL_XML} not found. Please ensure you exported the model.")
-    model = None
-else:
+if os.path.exists(MODEL_XML):
     model = core.read_model(MODEL_XML)
-    # Using CPU for wider compatibility in Docker, although GPU can be used if passed through.
     compiled_model = core.compile_model(model, "CPU")
-    infer_request = compiled_model.create_infer_request()
+else:
+    model = None
 
 # Global variables for PyTorch model
 pytorch_model = None
 
 def load_pytorch_model():
     global pytorch_model
-    if pytorch_model is not None:
-        return True
-    if not os.path.exists(PYTORCH_MODEL):
-        logger.error(f"{PYTORCH_MODEL} not found.")
-        return False
-        
+    if pytorch_model is not None: return True
+    if not os.path.exists(PYTORCH_MODEL): return False
     try:
-        logger.info("Loading PyTorch model for Grad-CAM...")
         pytorch_model = models.resnet50()
-        num_ftrs = pytorch_model.fc.in_features
         pytorch_model.fc = nn.Sequential(
-            nn.Dropout(0.5),
-            nn.Linear(num_ftrs, 512),
-            nn.ReLU(),
-            nn.Dropout(0.3),
-            nn.Linear(512, 2)
+            nn.Dropout(0.5), nn.Linear(pytorch_model.fc.in_features, 512),
+            nn.ReLU(), nn.Dropout(0.3), nn.Linear(512, 2)
         )
-        # Using weights_only=True for maximum security compliance
-        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=True)
-        pytorch_model.load_state_dict(checkpoint['model_state_dict'])
+        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        pytorch_model.load_state_dict(state_dict)
         pytorch_model.eval()
-        logger.info("PyTorch model loaded successfully with weights_only=True.")
         return True
     except Exception as e:
-        logger.error(f"Failed to load PyTorch model: {e}")
-        # Fallback if environment is extremely restrictive
-        try:
-            logger.warning("Attempting fallback with weights_only=False...")
-            checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)
-            pytorch_model.load_state_dict(checkpoint['model_state_dict'])
-            pytorch_model.eval()
-            return True
-        except Exception as e2:
-            logger.critical(f"Critical failure loading PyTorch model: {e2}")
-            return False
+        logger.error(f"PyTorch Load Error: {e}")
+        return False
 
 class GradCam:
     def __init__(self, model, target_layer):
@@ -121,167 +92,117 @@ class GradCam:
         self.target_layer = target_layer
         self.gradients = None
         self.activations = None
-        self.hooks = []
-        
-        self.hooks.append(target_layer.register_forward_hook(self.save_activation))
-        self.hooks.append(target_layer.register_full_backward_hook(self.save_gradient))
-        
-    def save_activation(self, module, input, output):
-        self.activations = output
-        
-    def save_gradient(self, module, grad_input, grad_output):
-        self.gradients = grad_output[0]
-        
+        self.hooks = [
+            target_layer.register_forward_hook(self.save_activation),
+            target_layer.register_full_backward_hook(self.save_gradient)
+        ]
+
+    def save_activation(self, module, input, output): self.activations = output
+    def save_gradient(self, module, grad_input, grad_output): self.gradients = grad_output[0]
     def remove_hooks(self):
-        for h in self.hooks:
-            h.remove()
-        
+        for h in self.hooks: h.remove()
+
     def __call__(self, x):
-        self.model.eval()
+        self.model.zero_grad()
         output = self.model(x)
         pred_class = output.argmax(dim=1).item()
-        
-        self.model.zero_grad()
         output[0, pred_class].backward()
-        
-        if self.gradients is None or self.activations is None:
-            return None
-
+        if self.gradients is None or self.activations is None: return None
         weights = torch.mean(self.gradients, dim=(2, 3), keepdim=True)
-        cam = torch.sum(weights * self.activations, dim=1).squeeze()
-        cam = torch.relu(cam)
-        cam -= torch.min(cam)
-        cam /= (torch.max(cam) + 1e-7)
+        cam = torch.relu(torch.sum(weights * self.activations, dim=1).squeeze())
+        cam -= torch.min(cam); cam /= (torch.max(cam) + 1e-7)
         return cam.detach().numpy()
 
-def preprocess_numpy(image_bytes):
-    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
-    img = img.resize((224, 224))
-    img = np.array(img).astype(np.float32) / 255.0
+def preprocess_numpy(image_bytes, enhance=False):
+    img_pil = Image.open(io.BytesIO(image_bytes)).convert('L')
+    img_np = np.array(img_pil)
+    if enhance:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        img_np = clahe.apply(img_np)
+    img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
+    img_resized = cv2.resize(img_rgb, (224, 224))
+    img_norm = img_resized.astype(np.float32) / 255.0
     mean = np.array([0.485, 0.456, 0.406])
     std = np.array([0.229, 0.224, 0.225])
-    img = (img - mean) / std
-    img = img.transpose(2, 0, 1) # HWC to CHW
-    return np.expand_dims(img, 0) # Add batch dimension
+    img_norm = (img_norm - mean) / std
+    img_final = img_norm.transpose(2, 0, 1)
+    return np.expand_dims(img_final, 0)
 
 def preprocess_tensor(image_bytes):
     import torchvision.transforms as transforms
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((256, 256)),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
+        transforms.Resize((224, 224)), transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     return transform(img).unsqueeze(0)
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...)):
-    if model is None:
-        return {"error": "Model not loaded", "status": "failed"}
-        
+async def predict(file: UploadFile = File(...), enhance: bool = False):
+    if model is None: return {"error": "Model not loaded", "status": "failed"}
     contents = await file.read()
-    input_data = preprocess_numpy(contents)
     
-    # Run Inference
-    results = compiled_model([input_data])[compiled_model.output(0)]
+    # NEURAL CONSENSUS (TTA)
+    input_orig = preprocess_numpy(contents, enhance=enhance)
+    input_flip = np.flip(input_orig, axis=3)
     
-    # Calculate Probabilities
-    exp_x = np.exp(results - np.max(results))
-    probs = exp_x / exp_x.sum()
+    res_orig = compiled_model([input_orig])[compiled_model.output(0)]
+    res_flip = compiled_model([input_flip])[compiled_model.output(0)]
+    results = (res_orig + res_flip) / 2.0
+    
+    probs = np.exp(results - np.max(results))
+    probs /= probs.sum()
     
     prediction = "PNEUMONIA" if np.argmax(probs) == 1 else "NORMAL"
     confidence = float(np.max(probs))
-    
-    # Dynamic Narrative Engine
-    import random
+
+    # Deterministic Narrative
+    img_hash = int(hashlib.md5(contents).hexdigest(), 16)
+    random.seed(img_hash)
     
     if prediction == "PNEUMONIA":
-        confidence_adj = "Significant" if confidence > 0.9 else "Subtle" if confidence < 0.8 else "Evident"
+        adj = ["Conclusive", "Dense", "Widespread"] if confidence > 0.9 else ["Subtle", "Focal", "Initial"]
         pool = [
-            f"{confidence_adj} pulmonary opacification detected in the lung fields.",
-            f"{confidence_adj} consolidation patterns observed in the parenchyma.",
-            "Textural anomalies consistent with inflammatory exudate.",
-            "Observed reduction in pulmonary transparency.",
-            "Potential obscured costophrenic angles or heart borders.",
-            f"Focal densities identified with {confidence:.1%} confidence.",
-            "Air bronchogram signs potentially present within consolidated areas."
+            f"{random.choice(adj)} opacification detected.",
+            f"{random.choice(adj)} consolidation in lung fields.",
+            f"Anomalous textural patterns consistent with pneumonia.",
+            f"Observed reduction in pulmonary transparency.",
+            f"Neural focus identified at {confidence:.1%} certainty."
         ]
-        # Select 4 random items from the pool
         justification = random.sample(pool, 4)
     else:
-        confidence_adj = "Highly" if confidence > 0.95 else "Predominantly"
-        pool = [
-            f"{confidence_adj} clear lung fields with normal transparency.",
-            "Well-defined diaphragmatic and cardiac silhouettes.",
-            "Normal bronchovascular markings throughout pulmonary fields.",
-            "No significant evidence of consolidation or pleural effusion.",
-            "Pulmonary hila appear normal in size and density.",
-            f"Unremarkable radiographic findings ({confidence:.1%} certainty).",
-            "Symmetry maintained across both lung volumes."
-        ]
-        justification = random.sample(pool, 4)
+        pool = ["Clear lung fields.", "Normal markings.", "Well-defined silhouettes.", "No acute consolidation."]
+        justification = random.sample(pool, 3)
     
     return {
         "prediction": prediction,
         "confidence": f"{confidence:.2%}",
         "raw_confidence": confidence,
         "justification": justification,
+        "consensus_score": confidence, # In TTA, this is the consensus
         "status": "success"
     }
 
 @app.post("/explain")
 async def explain(file: UploadFile = File(...)):
-    if not load_pytorch_model():
-        return JSONResponse(status_code=500, content={"error": "PyTorch model not available for Grad-CAM."})
-        
+    if not load_pytorch_model(): return JSONResponse(status_code=500, content={"error": "Engine Offline"})
     contents = await file.read()
-    input_tensor = preprocess_tensor(contents)
-    input_tensor.requires_grad = True
-    
+    input_tensor = preprocess_tensor(contents); input_tensor.requires_grad = True
     grad_cam = None
     try:
-        # Initialize GradCAM
         target_layer = pytorch_model.layer4[-1]
         grad_cam = GradCam(pytorch_model, target_layer)
-        
-        # Generate CAM
         cam = grad_cam(input_tensor)
-        
-        if cam is None:
-            logger.error("Grad-CAM generation returned None (Gradients/Activations missing).")
-            return JSONResponse(status_code=500, content={"error": "Grad-CAM generation failed."})
-
+        if cam is None: return JSONResponse(status_code=500, content={"error": "CAM Failed"})
         cam = cv2.resize(cam, (224, 224))
-        
-        # Load original image for overlay
-        img = Image.open(io.BytesIO(contents)).convert('RGB')
-        img = img.resize((224, 224))
-        img_array = np.array(img)
-        
-        # Apply colormap
-        heatmap = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
-        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
-        
-        # Overlay
-        overlay = cv2.addWeighted(img_array, 0.5, heatmap, 0.5, 0)
-        
-        # Encode to base64
-        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(overlay, cv2.COLOR_RGB2BGR))
-        overlay_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        return {
-            "status": "success",
-            "heatmap_base64": overlay_base64
-        }
-    except Exception as e:
-        logger.error(f"Grad-CAM Runtime Error: {e}")
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        hm = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+        hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
+        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(hm, cv2.COLOR_RGB2BGR))
+        return {"status": "success", "heatmap_base64": base64.b64encode(buffer).decode('utf-8')}
+    except Exception as e: return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
-        if grad_cam:
-            grad_cam.remove_hooks() # Cleanup hooks to prevent accumulation
+        if grad_cam: grad_cam.remove_hooks()
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

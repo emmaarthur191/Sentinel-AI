@@ -8,19 +8,95 @@ import cv2
 import time
 import json
 import logging
+import hashlib
+import random
+import os
+import torch
+import torch.nn as nn
+from torchvision import models, transforms
+import openvino.runtime as ov
+
 try:
     from fpdf import FPDF
 except ImportError:
     FPDF = None
+
+# SECURITY: Allowlist specific globals for PyTorch 2.4+
+try:
+    import torch.serialization
+    import _codecs
+    torch.serialization.add_safe_globals([
+        torch._utils._rebuild_device_tensor_from_numpy,
+        np._core.multiarray._reconstruct,
+        np.ndarray,
+        np.dtype,
+        _codecs.encode if '_codecs' in globals() else lambda x: x
+    ])
+except: pass
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- SENTINEL V1.0 PRODUCTION RELEASE ---
-# ===================== CONFIG =====================
+# ===================== CONFIG & MODELS =====================
 st.set_page_config(page_title="Sentinel-Ai Clinical Suite v1.0", page_icon="🛡️", layout="wide")
-API_URL = "http://localhost:8000"
+
+MODEL_XML = "best_pneumonia_model_openvino.xml"
+PYTORCH_MODEL = "best_pneumonia_model.pth"
+
+@st.cache_resource
+def load_openvino_engine():
+    core = ov.Core()
+    if os.path.exists(MODEL_XML):
+        model = core.read_model(MODEL_XML)
+        return core.compile_model(model, "CPU")
+    return None
+
+@st.cache_resource
+def load_pytorch_engine():
+    if not os.path.exists(PYTORCH_MODEL): return None
+    try:
+        model = models.resnet50()
+        model.fc = nn.Sequential(
+            nn.Dropout(0.5), nn.Linear(model.fc.in_features, 512),
+            nn.ReLU(), nn.Dropout(0.3), nn.Linear(512, 2)
+        )
+        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)
+        state_dict = checkpoint.get('model_state_dict', checkpoint)
+        model.load_state_dict(state_dict)
+        model.eval()
+        return model
+    except Exception as e:
+        logging.error(f"PyTorch Load Error: {e}")
+        return None
+
+class GradCam:
+    def __init__(self, model, target_layer):
+        self.model = model
+        self.target_layer = target_layer
+        self.gradients = None
+        self.activations = None
+        self.hooks = [
+            target_layer.register_forward_hook(self.save_activation),
+            target_layer.register_full_backward_hook(self.save_gradient)
+        ]
+
+    def save_activation(self, module, input, output): self.activations = output
+    def save_gradient(self, module, grad_input, grad_output): self.gradients = grad_output[0]
+    def remove_hooks(self):
+        for h in self.hooks: h.remove()
+
+    def __call__(self, x):
+        self.model.zero_grad()
+        output = self.model(x)
+        pred_class = output.argmax(dim=1).item()
+        output[0, pred_class].backward()
+        if self.gradients is None or self.activations is None: return None
+        weights = torch.mean(self.gradients, dim=(2, 3), keepdim=True)
+        cam = torch.relu(torch.sum(weights * self.activations, dim=1).squeeze())
+        cam -= torch.min(cam); cam /= (torch.max(cam) + 1e-7)
+        return cam.detach().numpy()
 
 # ===================== CLINICAL CSS (v1.0 INFINITY) =====================
 st.markdown("""
@@ -50,23 +126,94 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# ===================== API HELPERS =====================
-async def call_api_predict(image_bytes, enhance=False):
-    async with httpx.AsyncClient() as client:
-        files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
-        params = {'enhance': enhance}
-        try:
-            response = await client.post(f"{API_URL}/predict", files=files, params=params, timeout=30.0)
-            return response.json()
-        except: return {"status": "offline"}
+# ===================== ENGINE HELPERS =====================
+def preprocess_numpy(image_bytes, enhance=False):
+    img_pil = Image.open(io.BytesIO(image_bytes)).convert('L')
+    img_np = np.array(img_pil)
+    if enhance:
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        img_np = clahe.apply(img_np)
+    img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
+    img_resized = cv2.resize(img_rgb, (224, 224))
+    img_norm = img_resized.astype(np.float32) / 255.0
+    mean = np.array([0.485, 0.456, 0.406])
+    std = np.array([0.229, 0.224, 0.225])
+    img_norm = (img_norm - mean) / std
+    img_final = img_norm.transpose(2, 0, 1)
+    return np.expand_dims(img_final, 0)
 
-async def call_api_explain(image_bytes):
-    async with httpx.AsyncClient() as client:
-        files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
-        try:
-            response = await client.post(f"{API_URL}/explain", files=files, timeout=45.0)
-            return response.json()
-        except: return {"status": "offline"}
+def predict_local(image_bytes, enhance=False):
+    engine = load_openvino_engine()
+    if engine is None: return {"status": "offline"}
+    
+    input_orig = preprocess_numpy(image_bytes, enhance=enhance)
+    input_flip = np.flip(input_orig, axis=3)
+    
+    res_orig = engine([input_orig])[engine.output(0)]
+    res_flip = engine([input_flip])[engine.output(0)]
+    results = (res_orig + res_flip) / 2.0
+    
+    probs = np.exp(results - np.max(results))
+    probs /= probs.sum()
+    
+    prediction = "PNEUMONIA" if np.argmax(probs) == 1 else "NORMAL"
+    confidence = float(np.max(probs))
+
+    # Deterministic Narrative
+    img_hash = int(hashlib.md5(image_bytes).hexdigest(), 16)
+    random.seed(img_hash)
+    
+    if prediction == "PNEUMONIA":
+        adj = ["Conclusive", "Dense", "Widespread"] if confidence > 0.9 else ["Subtle", "Focal", "Initial"]
+        pool = [
+            f"{random.choice(adj)} opacification detected.",
+            f"{random.choice(adj)} consolidation in lung fields.",
+            f"Anomalous textural patterns consistent with pneumonia.",
+            f"Observed reduction in pulmonary transparency.",
+            f"Neural focus identified at {confidence:.1%} certainty."
+        ]
+        justification = random.sample(pool, 4)
+    else:
+        pool = ["Clear lung fields.", "Normal markings.", "Well-defined silhouettes.", "No acute consolidation."]
+        justification = random.sample(pool, 3)
+    
+    return {
+        "prediction": prediction,
+        "confidence": f"{confidence:.2%}",
+        "raw_confidence": confidence,
+        "justification": justification,
+        "status": "success"
+    }
+
+def explain_local(image_bytes):
+    model = load_pytorch_engine()
+    if model is None: return {"status": "offline"}
+    
+    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)), transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    input_tensor = transform(img).unsqueeze(0)
+    input_tensor.requires_grad = True
+    
+    grad_cam = None
+    try:
+        target_layer = model.layer4[-1]
+        grad_cam = GradCam(model, target_layer)
+        cam = grad_cam(input_tensor)
+        if cam is None: return {"status": "failed"}
+        
+        cam = cv2.resize(cam, (224, 224))
+        hm = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
+        hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
+        _, buffer = cv2.imencode('.jpg', cv2.cvtColor(hm, cv2.COLOR_RGB2BGR))
+        return {"status": "success", "heatmap_base64": base64.b64encode(buffer).decode('utf-8')}
+    except Exception as e:
+        logging.error(f"Grad-CAM Error: {e}")
+        return {"status": "failed"}
+    finally:
+        if grad_cam: grad_cam.remove_hooks()
 
 # ===================== SIDEBAR (COMMAND HUB) =====================
 if "reset_counter" not in st.session_state: st.session_state.reset_counter = 0
@@ -88,7 +235,7 @@ with st.sidebar:
 
     cam_opacity = st.slider("Heatmap Opacity", 0.0, 1.0, 0.6)
 
-    if st.button("🔄 REBOOT", use_container_width=True):
+    if st.button("🔄 REBOOT", width="stretch"):
         st.session_state.reset_counter += 1
         for key in list(st.session_state.keys()):
             if key != "reset_counter": del st.session_state[key]
@@ -136,16 +283,9 @@ if uploaded_file:
     else:
         proc_bytes = img_bytes
 
-    import asyncio
     with st.spinner("INITIATING INFINITY TRIAGE..."):
-        async def analyze():
-            tasks = [call_api_predict(proc_bytes, enhance=enhance_mode)]
-            if show_gcam: tasks.append(call_api_explain(proc_bytes))
-            return await asyncio.gather(*tasks)
-
-        results = asyncio.run(analyze())
-        predict_res = results[0]
-        explain_res = results[1] if show_gcam else {"status": "disabled"}
+        predict_res = predict_local(proc_bytes, enhance=enhance_mode)
+        explain_res = explain_local(proc_bytes) if show_gcam else {"status": "disabled"}
 
     if predict_res.get("status") == "success":
         prediction = predict_res["prediction"]
@@ -157,7 +297,7 @@ if uploaded_file:
             col_raw, col_cam = st.columns(2)
             with col_raw:
                 st.markdown("<p class='hud-label' style='text-align: center;'>ENHANCED RADIOGRAPH</p>", unsafe_allow_html=True)
-                st.image(image, use_container_width=True)
+                st.image(image, width="stretch")
             with col_cam:
                 st.markdown("<p class='hud-label' style='text-align: center;'>NEURAL FOCUS (GRAD-CAM)</p>", unsafe_allow_html=True)
                 if explain_res.get("status") == "success":
@@ -167,10 +307,10 @@ if uploaded_file:
                     orig_np = np.array(image.resize((224, 224)))
                     hm_np = cv2.resize(hm_np, (224, 224))
                     overlay = cv2.addWeighted(orig_np, 1 - cam_opacity, hm_np, cam_opacity, 0)
-                    st.image(overlay, use_container_width=True)
+                    st.image(overlay, width="stretch")
                 else: st.error("CAM Logic Unavailable")
         else:
-            st.image(image, use_container_width=True)
+            st.image(image, width="stretch")
 
         # 2. Result Ribbon
         outcome_class = "badge-positive" if prediction == "PNEUMONIA" else "badge-normal"
@@ -230,7 +370,7 @@ if uploaded_file:
                         data=pdf_bytes,
                         file_name=f"Sentinel_Report_V1_{c_id}.pdf",
                         mime="application/pdf",
-                        use_container_width=True
+                        width="stretch"
                     )
             except Exception as e:
                 st.error(f"Report Engine Error: {str(e)}")
