@@ -185,6 +185,14 @@ st.markdown("""
     .stButton>button:hover { border-color: #ff4b4b; color: #ff4b4b; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255, 75, 75, 0.2); }
     .metric-box { text-align: center; padding: 15px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.05); }
     .lucide-icon { width: 20px; height: 20px; vertical-align: middle; margin-right: 8px; stroke: currentColor; stroke-width: 2; fill: none; }
+    
+    /* File Uploader Fix */
+    [data-testid="stFileUploader"] {
+        margin-top: -15px;
+    }
+    [data-testid="stFileUploader"] section {
+        padding: 0;
+    }
     </style>
 """, unsafe_allow_html=True)
 
@@ -205,7 +213,7 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.markdown("### <i data-lucide='file-up' class='lucide-icon'></i> Data Input", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Upload Radiograph", type=["jpg", "jpeg", "png"], label_visibility="collapsed", key=f"file_{st.session_state.uploader_key}")
+    uploaded_file = st.file_uploader("Upload Radiograph", type=["jpg", "jpeg", "png"], label_visibility="hidden", key=f"file_{st.session_state.uploader_key}")
     if uploaded_file:
         image = Image.open(uploaded_file).convert('RGB')
         st.image(image, use_container_width=True, caption="Original Scan")
