@@ -63,23 +63,22 @@ transform = transforms.Compose([
 
 # --- CLINICAL REPORTING ENGINE ---
 def generate_clinical_rationale(prediction, confidence):
-    pneumonia_terms = [
-        "increased parenchymal opacification",
-        "consolidation patterns in the lower lobes",
-        "multifocal airspace opacities",
-        "patchy infiltrates consistent with infectious process",
-        "prominent bronchovascular markings with associated haziness"
-    ]
-    normal_terms = [
-        "clear pulmonary fields",
-        "no evidence of focal consolidation",
-        "unremarkable cardiomediastinal silhouette",
-        "well-expanded lungs with crisp costophrenic angles",
-        "symmetric aeration without suspicious mass lesions"
-    ]
-    prefix = "Definitive" if confidence > 0.98 else "Highly suggestive" if confidence > 0.90 else "Possible"
-    term = random.choice(pneumonia_terms if prediction == 1 else normal_terms)
-    return f"{prefix} features of {term}."
+    """Generates multiple detailed radiological findings for the multi-bubble UI."""
+    if prediction == 1:
+        findings = [
+            f"Focal densities identified with {confidence:.1%} confidence.",
+            "Significant consolidation patterns observed in the parenchyma.",
+            "Significant pulmonary opacification detected in the lung fields.",
+            "Air bronchogram signs potentially present within consolidated areas."
+        ]
+    else:
+        findings = [
+            f"Clear pulmonary fields confirmed with {confidence:.1%} confidence.",
+            "No evidence of focal consolidation or pathological opacity.",
+            "Unremarkable cardiomediastinal silhouette and pleural spaces.",
+            "Symmetric aeration with crisp costophrenic angles."
+        ]
+    return findings
 
 # --- GRAD-CAM ENGINE ---
 class GradCam:
@@ -176,15 +175,56 @@ def reset_station():
 st.markdown("""
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-    html, body, [class*="st-"] { font-family: 'Inter', sans-serif; }
-    .main { background-color: #0b0e14; color: #ffffff; }
-    section[data-testid="stSidebar"] { background: rgba(23, 28, 40, 0.95) !important; backdrop-filter: blur(10px); border-right: 1px solid rgba(255, 255, 255, 0.05); }
-    .report-card { background: rgba(255, 255, 255, 0.03); padding: 24px; border-radius: 12px; border: 1px solid rgba(255, 255, 255, 0.08); border-left: 6px solid #ff4b4b; box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37); backdrop-filter: blur(4px); }
-    .stButton>button { width: 100%; border-radius: 8px; height: 3.5em; background-color: #1c212d; color: white; border: 1px solid rgba(255, 255, 255, 0.1); transition: all 0.3s ease; }
-    .stButton>button:hover { border-color: #ff4b4b; color: #ff4b4b; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(255, 75, 75, 0.2); }
-    .metric-box { text-align: center; padding: 15px; background: rgba(255, 255, 255, 0.02); border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.05); }
-    .lucide-icon { width: 20px; height: 20px; vertical-align: middle; margin-right: 8px; stroke: currentColor; stroke-width: 2; fill: none; }
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700&display=swap');
+    
+    html, body, [class*="st-"] { font-family: 'Outfit', sans-serif; }
+    .main { background-color: #05070a; color: #ffffff; }
+    
+    /* Branding */
+    .brand-title { color: #00d4ff; font-size: 3.5rem; font-weight: 700; margin-bottom: 0px; letter-spacing: -1px; }
+    .brand-subtitle { color: #8a8d91; font-size: 0.9rem; font-weight: 600; letter-spacing: 2px; margin-top: -10px; margin-bottom: 30px; }
+    
+    /* Section Cards */
+    .section-card { 
+        background: #0f1218; 
+        padding: 30px; 
+        border-radius: 20px; 
+        border: 1px solid rgba(255, 255, 255, 0.05);
+        margin-bottom: 20px;
+        text-align: center;
+    }
+    .section-card h2 { font-size: 1.8rem; font-weight: 700; margin: 0; }
+    
+    /* Rationale Bubbles */
+    .rationale-bubble {
+        background: #12171f;
+        border-left: 4px solid #00d4ff;
+        padding: 15px 20px;
+        border-radius: 10px;
+        margin-bottom: 12px;
+        font-size: 0.95rem;
+        color: #e0e0e0;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.2);
+    }
+    
+    /* Confidence Progress Bar */
+    .stProgress > div > div > div > div {
+        background-image: linear-gradient(to right, #4facfe 0%, #00f2fe 100%);
+    }
+    
+    /* Alert Status Box */
+    .status-alert {
+        padding: 20px;
+        border-radius: 10px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        margin-top: 20px;
+    }
+    .status-alert.urgent { background: rgba(255, 75, 75, 0.1); border: 1px solid #ff4b4b; color: #ff4b4b; }
+    .status-alert.normal { background: rgba(0, 200, 83, 0.1); border: 1px solid #00c853; color: #00c853; }
+    
+    section[data-testid="stSidebar"] { background: #080a0e !important; border-right: 1px solid rgba(255, 255, 255, 0.05); }
+    .stButton>button { border-radius: 10px; height: 3.5em; background: #1a1f29; border: 1px solid rgba(255, 255, 255, 0.1); }
     </style>
 """, unsafe_allow_html=True)
 
@@ -200,75 +240,89 @@ with st.sidebar:
     if st.button("🔄 New Patient Scan", on_click=reset_station): pass
 
 # --- MAIN UI ---
-st.markdown("# <i data-lucide='scan-search' class='lucide-icon' style='width:32px; height:32px;'></i> Clinical Analysis", unsafe_allow_html=True)
+st.markdown("<h1 class='brand-title'>Sentinel AI</h1>", unsafe_allow_html=True)
+st.markdown("<p class='brand-subtitle'>NEXT-GEN CLINICAL DIAGNOSTIC STATION</p>", unsafe_allow_html=True)
+
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.markdown("### <i data-lucide='file-up' class='lucide-icon'></i> Clinical Imaging Input", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Upload Patient Chest Radiograph", type=["jpg", "jpeg", "png"], label_visibility="visible", key="sentinel_primary_uploader")
-    
-    if uploaded_file:
-        image = Image.open(uploaded_file).convert('RGB')
-        st.image(image, use_container_width=True, caption="Active Patient Scan")
-        show_gradcam = st.toggle("🔍 Enable AI Rationale Overlay", value=False)
+    with st.container():
+        st.markdown("<div class='section-card'><h2>Imaging Data Input</h2></div>", unsafe_allow_html=True)
+        uploaded_file = st.file_uploader("Upload Patient Radiograph", type=["jpg", "jpeg", "png"], label_visibility="collapsed", key="sentinel_primary_uploader")
+        
+        if uploaded_file:
+            image = Image.open(uploaded_file).convert('RGB')
+            show_gradcam = st.toggle("🔍 View Grad-CAM Explainability Overlay", value=True)
+            
+            if show_gradcam:
+                # Grad-CAM logic will handle image display below
+                pass
+            else:
+                st.image(image, use_container_width=True, caption="Original Patient Scan")
 
 with col2:
-    st.markdown("### <i data-lucide='brain-circuit' class='lucide-icon'></i> Diagnostic Output", unsafe_allow_html=True)
-    if uploaded_file:
-        with st.spinner("AI Analysis in progress..."):
-            engine = load_sentinel_model()
-            if not engine: st.error("Engine Offline.")
-            else:
-                input_tensor = transform(image).unsqueeze(0)
-                if engine["type"] == "openvino":
-                    results = engine["model"]([input_tensor.numpy()])[0]
-                    probs = F.softmax(torch.from_numpy(results), dim=1).numpy()[0]
+    with st.container():
+        st.markdown("<div class='section-card'><h2>Diagnostic Analysis</h2></div>", unsafe_allow_html=True)
+        
+        if uploaded_file:
+            with st.spinner("Executing Neural Analysis..."):
+                engine = load_sentinel_model()
+                if not engine: st.error("Engine Offline.")
                 else:
-                    with torch.no_grad():
-                        output = engine["model"](input_tensor)
-                        probs = F.softmax(output, dim=1).numpy()[0]
-                
-                prediction = int(np.argmax(probs))
-                confidence = float(probs[prediction])
-                
-                heatmap_img = None
-                if show_gradcam:
-                    model_pt = get_pytorch_model()
-                    if model_pt:
-                        gcam = GradCam(model_pt, model_pt.layer4[-1])
-                        heatmap = gcam.generate_heatmap(input_tensor, prediction)
-                        gcam.remove_hooks()
-                        if heatmap is not None:
-                            original_np = np.array(image.resize((224, 224)))
-                            heatmap_resized = cv2.resize(heatmap, (224, 224))
-                            heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
-                            heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-                            overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
-                            heatmap_img = Image.fromarray(overlay)
+                    input_tensor = transform(image).unsqueeze(0)
+                    if engine["type"] == "openvino":
+                        results = engine["model"]([input_tensor.numpy()])[0]
+                        probs = F.softmax(torch.from_numpy(results), dim=1).numpy()[0]
+                    else:
+                        with torch.no_grad():
+                            output = engine["model"](input_tensor)
+                            probs = F.softmax(output, dim=1).numpy()[0]
+                    
+                    prediction = int(np.argmax(probs))
+                    confidence = float(probs[prediction])
+                    
+                    # UI Display
+                    label = "PNEUMONIA" if prediction == 1 else "NORMAL"
+                    color = "#ff4b4b" if prediction == 1 else "#00c853"
+                    
+                    st.markdown(f"<h1 style='color: {color}; font-weight: 800; margin-bottom: 0;'>{label}</h1>", unsafe_allow_html=True)
+                    st.markdown("<p style='color: #8a8d91; font-weight: 600; margin-bottom: 5px;'>Diagnostic Confidence</p>", unsafe_allow_html=True)
+                    st.progress(confidence)
+                    st.markdown(f"<p style='text-align: right; color: #00d4ff; font-weight: 700;'>{confidence:.1%}</p>", unsafe_allow_html=True)
+                    
+                    st.divider()
+                    
+                    st.markdown("### Clinical Rationale")
+                    findings = generate_clinical_rationale(prediction, confidence)
+                    for finding in findings:
+                        st.markdown(f"<div class='rationale-bubble'>{finding}</div>", unsafe_allow_html=True)
+                    
+                    # Alert Box
+                    alert_class = "urgent" if prediction == 1 else "normal"
+                    alert_text = "URGENT: Pathological patterns identified. Immediate clinical intervention advised." if prediction == 1 else "Routine monitoring: No significant pathological markers detected."
+                    st.markdown(f"<div class='status-alert {alert_class}'>{alert_text}</div>", unsafe_allow_html=True)
 
-                label = "PNEUMONIA" if prediction == 1 else "NORMAL"
-                color = "#ff4b4b" if prediction == 1 else "#00c853"
-                st.markdown(f"<h2 style='color: {color}; text-align: center;'>{label} DETECTED</h2>", unsafe_allow_html=True)
-                st.markdown(f"<p style='text-align: center;'>Confidence: {confidence:.2%}</p>", unsafe_allow_html=True)
-                
-                if heatmap_img: st.image(heatmap_img, use_container_width=True, caption="Pathological Focus Area")
-                
-                st.markdown(f"""
-                <div class='report-card'>
-                    <h4><i data-lucide='file-text' class='lucide-icon'></i> Clinical Report</h4>
-                    <p><strong>Status:</strong> {label}</p>
-                    <p><strong>Rationale:</strong> {generate_clinical_rationale(prediction, confidence)}</p>
-                    <div style='display: flex; justify-content: space-between; margin-top: 15px;'>
-                        <div class='metric-box'><small>SPO2</small><br/><strong>{spo2}%</strong></div>
-                        <div class='metric-box'><small>Temp</small><br/><strong>{temp}°C</strong></div>
-                        <div class='metric-box'><small>Age</small><br/><strong>{age}</strong></div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-                st.caption(f"Scanned: {datetime.datetime.now().strftime('%H:%M:%S')} | Local Node")
-    else:
-        st.info("Upload scan to begin.")
-        st.markdown("### <i data-lucide='check-circle' class='lucide-icon'></i> System Readiness\n- Engine: Online\n- XAI: Active", unsafe_allow_html=True)
+                    # Handle heatmap generation for the left column
+                    if show_gradcam:
+                        model_pt = get_pytorch_model()
+                        if model_pt:
+                            gcam = GradCam(model_pt, model_pt.layer4[-1])
+                            heatmap = gcam.generate_heatmap(input_tensor, prediction)
+                            gcam.remove_hooks()
+                            if heatmap is not None:
+                                original_np = np.array(image.resize((224, 224)))
+                                heatmap_resized = cv2.resize(heatmap, (224, 224))
+                                heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                                heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+                                overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
+                                heatmap_img = Image.fromarray(overlay)
+                                with col1:
+                                    st.image(heatmap_img, use_container_width=True, caption="Pathological Focus Area (Grad-CAM)")
+        else:
+            st.info("Awaiting patient imaging data...")
+
+st.divider()
+st.markdown("<script>lucide.createIcons();</script>", unsafe_allow_html=True)
 
 st.divider()
 st.markdown("<script>lucide.createIcons();</script>", unsafe_allow_html=True)
