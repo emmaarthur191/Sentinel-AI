@@ -9,7 +9,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models, transforms
-import openvino.runtime as ov
+try:
+    import openvino.runtime as ov
+except ImportError:
+    try:
+        import openvino as ov
+    except ImportError:
+        ov = None
 import logging
 import datetime
 
@@ -92,7 +98,7 @@ class GradCam:
 def load_sentinel_model():
     """Load the best available model version."""
     # Priority 1: OpenVINO (Production Optimized)
-    if os.path.exists(OPENVINO_MODEL_PATH):
+    if ov and os.path.exists(OPENVINO_MODEL_PATH):
         try:
             core = ov.Core()
             model_ov = core.read_model(OPENVINO_MODEL_PATH)
