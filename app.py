@@ -1,321 +1,248 @@
 import streamlit as st
-import requests
-from PIL import Image
+import httpx
+from PIL import Image, ImageFilter
 import io
-import os
 import base64
 import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torchvision import models, transforms
-try:
-    import openvino.runtime as ov
-except ImportError:
-    ov = None
 import cv2
-import logging
-import random
 import time
+import json
+import logging
+try:
+    from fpdf import FPDF
+except ImportError:
+    FPDF = None
 
-# ===================== CONFIG & SYSTEM =====================
+# Configure Logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("Sentinel-AI")
+logger = logging.getLogger(__name__)
 
-st.set_page_config(page_title="Sentinel AI Clinical Suite", page_icon="🛡️", layout="wide")
+# --- SENTINEL V1.0 PRODUCTION RELEASE ---
+# ===================== CONFIG =====================
+st.set_page_config(page_title="Sentinel-Ai Clinical Suite v1.0", page_icon="🛡️", layout="wide")
+API_URL = "http://localhost:8000"
 
-MODEL_PATH = 'best_pneumonia_model.pth'
-OPENVINO_MODEL_PATH = 'best_pneumonia_model_openvino.xml'
-
-# Preprocessing
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-])
-
-# ===================== CLINICAL RATIONALE ENGINE =====================
-def generate_clinical_rationale(prediction, confidence, seed=42):
-    rng = random.Random(seed)
-    if prediction == 1:
-        pool = [
-            "Focal consolidation identified in the lower pulmonary lobes.",
-            "Silhouette sign observed, obscuring the diaphragmatic border.",
-            "Parenchymal opacification consistent with bacterial infiltrate.",
-            "Neural focus highlights suspicious perihilar haziness.",
-            "Air bronchogram patterns potentially present in the consolidated zone.",
-            "Increased density suggests active inflammatory parenchymal disease."
-        ]
-    else:
-        pool = [
-            "Clear pulmonary aeration across all lung fields.",
-            "Unremarkable hilar silhouettes and costophrenic angles.",
-            "No evidence of focal consolidation or pathological masses.",
-            "Symmetric expansion with normal vascular markings.",
-            "Normal cardiomediastinal contours and midline trachea.",
-            "Pleural spaces appear clear with no effusion."
-        ]
-    return rng.sample(pool, min(3, len(pool)))
-
-# ===================== GRAD-CAM CORE =====================
-class GradCam:
-    def __init__(self, model, target_layer):
-        self.model = model
-        self.target_layer = target_layer
-        self.gradients = None
-        self.activations = None
-        self.hooks = []
-        self._register_hooks()
-
-    def _register_hooks(self):
-        def forward_hook(module, input, output): self.activations = output.detach()
-        def backward_hook(module, grad_input, grad_output): self.gradients = grad_output[0].detach()
-        self.hooks.append(self.target_layer.register_forward_hook(forward_hook))
-        self.hooks.append(self.target_layer.register_full_backward_hook(backward_hook))
-
-    def remove_hooks(self):
-        for h in self.hooks: h.remove()
-
-    def generate_heatmap(self, input_tensor, class_idx):
-        try:
-            self.model.zero_grad()
-            input_tensor.requires_grad = True
-            output = self.model(input_tensor)
-            score = output[0, class_idx]
-            score.backward(retain_graph=True)
-            if self.gradients is None or self.activations is None: return None
-            
-            weights = np.mean(self.gradients.data.cpu().numpy()[0], axis=(1, 2))
-            heatmap = np.zeros(self.activations.shape[2:], dtype=np.float32)
-            for i, w in enumerate(weights):
-                heatmap += w * self.activations.data.cpu().numpy()[0][i, :, :]
-            
-            heatmap = np.maximum(heatmap, 0)
-            h_min, h_max = np.min(heatmap), np.max(heatmap)
-            if h_max > h_min: heatmap = (heatmap - h_min) / (h_max - h_min)
-            return cv2.GaussianBlur(heatmap, (11, 11), 0)
-        except Exception as e:
-            logger.error(f"Grad-CAM Error: {e}")
-            return None
-
-# ===================== MODEL MANAGEMENT =====================
-@st.cache_resource
-def get_pytorch_model():
-    if not os.path.exists(MODEL_PATH):
-        logger.error(f"MODEL NOT FOUND at {MODEL_PATH}")
-        return None
-    try:
-        model = models.resnet50(weights=None)
-        model.fc = nn.Linear(model.fc.in_features, 2)
-        
-        # DUAL-PASS LOADING: Try secure first, then legacy fallback
-        try:
-            checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=True)
-        except Exception as e:
-            logger.warning(f"Secure load failed: {e}. Attempting legacy fallback.")
-            checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=False)
-            
-        model.load_state_dict(checkpoint)
-        for param in model.parameters(): param.requires_grad = True
-        model.eval()
-        return model
-    except Exception as e:
-        logger.error(f"Neural Ignition Failure: {e}")
-        return None
-
-def load_sentinel_model():
-    if ov and os.path.exists(OPENVINO_MODEL_PATH):
-        try:
-            core = ov.Core()
-            model_ov = core.read_model(OPENVINO_MODEL_PATH)
-            return {"type": "openvino", "model": core.compile_model(model_ov, "CPU")}
-        except: pass
-    pt = get_pytorch_model()
-    return {"type": "pytorch", "model": pt} if pt else None
-
-# ===================== WORLD-CLASS CSS (v4.0 GLASS) =====================
+# ===================== CLINICAL CSS (v1.0 INFINITY) =====================
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&family=JetBrains+Mono:wght@400;700&display=swap');
-
     html, body, [class*="st-"] { font-family: 'Outfit', sans-serif; }
-    .main { background: radial-gradient(circle at top right, #0a101e, #030508); color: #f8fafc; }
-    
-    /* 3-Second Rule Result Banner */
-    .result-banner {
-        padding: 30px;
-        border-radius: 20px;
-        text-align: center;
-        margin-bottom: 25px;
-        backdrop-filter: blur(15px);
-        border: 1px solid rgba(255,255,255,0.1);
-        animation: slideIn 0.5s ease-out;
+    /* Comfort-Fit Sidebar Logic */
+    [data-testid="stSidebar"] {
+        width: 280px !important;
+        min-width: 280px !important;
     }
-    .banner-positive { background: rgba(230, 57, 70, 0.15); border-color: #E63946; }
-    .banner-normal { background: rgba(42, 157, 143, 0.15); border-color: #2A9D8F; }
-    
-    .headline-red { color: #E63946; font-size: 3.5rem; font-weight: 800; margin: 0; }
-    .headline-green { color: #2A9D8F; font-size: 3.5rem; font-weight: 800; margin: 0; }
-    
-    /* Clinical Glass Card */
-    .glass-card {
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.05);
-        border-radius: 16px;
-        padding: 20px;
-        margin-bottom: 15px;
-    }
-    
-    /* Pulse Animation */
-    .pulse-dot {
-        height: 10px; width: 10px; background-color: #2A9D8F;
-        border-radius: 50%; display: inline-block;
-        box-shadow: 0 0 0 0 rgba(42, 157, 143, 0.7);
-        animation: pulse 2s infinite;
-    }
-    @keyframes pulse {
-        0% { box-shadow: 0 0 0 0 rgba(42, 157, 143, 0.7); }
-        70% { box-shadow: 0 0 0 10px rgba(42, 157, 143, 0); }
-        100% { box-shadow: 0 0 0 0 rgba(42, 157, 143, 0); }
-    }
-    @keyframes slideIn { from { opacity: 0; transform: translateY(-20px); } to { opacity: 1; transform: translateY(0); } }
+    [data-testid="stSidebar"] .st-emotion-cache-1647n7p { padding: 1rem 1rem; }
 
-    /* HUD Metrics */
-    .hud-label { font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: #64748b; letter-spacing: 2px; }
-    .hud-value { font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: #00d4ff; }
+    .diagnostic-badge {
+        padding: 5px 15px; border-radius: 8px; text-align: center; margin-bottom: 8px;
+        backdrop-filter: blur(15px); border: 1px solid rgba(255,255,255,0.1);
+    }
+    .badge-positive { background: rgba(230, 57, 70, 0.2); border-color: #E63946; }
+    .badge-normal { background: rgba(42, 157, 143, 0.2); border-color: #2A9D8F; }
+
+    .glass-card {
+        background: rgba(255, 255, 255, 0.03); border: 1px solid rgba(255, 255, 255, 0.05);
+        border-radius: 12px; padding: 15px; margin-bottom: 15px;
+    }
+    .hud-label { font-family: 'JetBrains Mono', monospace; font-size: 0.6rem; color: #64748b; letter-spacing: 2px; }
+    .hud-value { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: #00d4ff; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===================== SIDEBAR (CLINICAL HUB) =====================
+# ===================== API HELPERS =====================
+async def call_api_predict(image_bytes, enhance=False):
+    async with httpx.AsyncClient() as client:
+        files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
+        params = {'enhance': enhance}
+        try:
+            response = await client.post(f"{API_URL}/predict", files=files, params=params, timeout=30.0)
+            return response.json()
+        except: return {"status": "offline"}
+
+async def call_api_explain(image_bytes):
+    async with httpx.AsyncClient() as client:
+        files = {'file': ('image.jpg', image_bytes, 'image/jpeg')}
+        try:
+            response = await client.post(f"{API_URL}/explain", files=files, timeout=45.0)
+            return response.json()
+        except: return {"status": "offline"}
+
+# ===================== SIDEBAR (COMMAND HUB) =====================
+if "reset_counter" not in st.session_state: st.session_state.reset_counter = 0
+
 with st.sidebar:
-    st.markdown("<h1 style='color: #00d4ff; font-weight: 800;'>SENTINEL-AI</h1>", unsafe_allow_html=True)
-    
-    # Pulse Status
-    status_color = "#2A9D8F" if ov else "#f39c12"
-    st.markdown(f"""
-        <div style='background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px; margin-bottom: 20px;'>
-            <span class="pulse-dot"></span> 
-            <span style='font-family: monospace; font-size: 0.8rem; margin-left: 10px;'>INTEL OPENVINO ACTIVE</span>
-        </div>
-    """, unsafe_allow_html=True)
-    
-    st.markdown("### 🏥 FACILITY METADATA")
-    facility = st.text_input("Facility Name", value="Accra Psychiatric Hospital")
-    clinician_id = st.text_input("Clinician ID", value="STN-99-ALPHA")
-    
-    st.divider()
-    st.markdown("### 📥 BATCH UPLOAD")
-    uploaded_file = st.file_uploader("", type=["jpg", "jpeg", "png"], key="sentinel_v4_clinical")
-    
-    st.divider()
-    st.markdown("### 🛠️ SYSTEM CONTROLS")
-    cam_opacity = st.slider("Heatmap Overlay Intensity", 0.0, 1.0, 0.6)
-    
-    if st.button("🔄 HARD RESET"):
-        for key in list(st.session_state.keys()): del st.session_state[key]
+    st.markdown("<h1 style='color: #00d4ff; font-weight: 800; margin:0; font-size: 1.2rem;'>SENTINEL-Ai V1</h1>", unsafe_allow_html=True)
+    st.markdown("<p style='font-size: 0.6rem; color: #64748b; margin-bottom: 10px;'>PRODUCTION RELEASE</p>", unsafe_allow_html=True)
+
+    st.markdown("<p class='hud-label'>🏥 CONFIGURATION</p>", unsafe_allow_html=True)
+    c1, c2 = st.columns(2)
+    with c1: facility = st.text_input("Facility", "CENTRAL", key="facility", label_visibility="collapsed")
+    with c2: clinician_id = st.text_input("ID", "STN-77", key="clinician", label_visibility="collapsed")
+
+    st.markdown("<p class='hud-label'>⚙️ ENGINE CONTROLS</p>", unsafe_allow_html=True)
+    e1, e2 = st.columns(2)
+    with e1: enhance_mode = st.toggle("Enhance", value=False)
+    with e2: privacy_shield = st.toggle("Shield", value=True)
+    show_gcam = st.toggle("Neural Focus (Grad-CAM)", value=True)
+
+    cam_opacity = st.slider("Heatmap Opacity", 0.0, 1.0, 0.6)
+
+    if st.button("🔄 REBOOT", use_container_width=True):
+        st.session_state.reset_counter += 1
+        for key in list(st.session_state.keys()):
+            if key != "reset_counter": del st.session_state[key]
         st.rerun()
 
+    st.markdown("<div style='border-top: 1px solid rgba(255,255,255,0.05); margin-top: 20px; padding-top: 15px;'>", unsafe_allow_html=True)
+    st.markdown(f"""
+    <div style='font-size: 0.7rem; color: #64748b; line-height: 1.4;'>
+        <b style='color: #94a3b8;'>SYSTEM SPECIFICATIONS</b><br>
+        Core: ResNet-50 x OpenVINO<br>
+        Metrics: 99.5% Sen | 94.07% Acc<br><br>
+        <b style='color: #94a3b8;'>CONTACT SUPPORT</b><br>
+        <a href='mailto:snyper191@gmail.com' style='color: #00d4ff; text-decoration: none;'>snyper191@gmail.com</a>
+    </div>
+    """, unsafe_allow_html=True)
+    st.markdown("</div>", unsafe_allow_html=True)
+
 # ===================== MAIN STAGE =====================
+st.markdown("<div class='glass-card' style='margin-bottom: 20px;'>", unsafe_allow_html=True)
+uploaded_file = st.file_uploader("📥 DEPLOY RADIOGRAPH FOR ANALYSIS", type=["jpg","jpeg","png"], key=f"main_{st.session_state.reset_counter}")
+st.markdown("</div>", unsafe_allow_html=True)
+
 if uploaded_file:
-    # 1. Diagnostic Header (Privacy-First)
+    # Diagnostic Header
     st.markdown(f"""
         <div class='glass-card' style='display: flex; justify-content: space-between; align-items: center;'>
-            <div>
-                <span class='hud-label'>SCAN REFERENCE:</span> <span class='hud-value'>{uploaded_file.name}</span>
-            </div>
-            <div class='hud-label' style='color: #2A9D8F;'>SYSTEM STATUS: CLINICAL ANALYSIS ACTIVE</div>
+            <div><span class='hud-label'>REF:</span> <span class='hud-value'>{uploaded_file.name}</span></div>
+            <div class='hud-label' style='color: #2A9D8F;'>CONSENSUS: NEURAL VOTING ACTIVE</div>
         </div>
     """, unsafe_allow_html=True)
 
-    # 2. Processing
-    image = Image.open(uploaded_file).convert('RGB')
-    engine = load_sentinel_model()
-    input_tensor = transform(image).unsqueeze(0)
-    
-    start_time = time.time()
-    if engine["type"] == "openvino":
-        compiled = engine["model"]
-        result = compiled({compiled.input(0): input_tensor.numpy()})
-        probs = F.softmax(torch.from_numpy(result[compiled.output(0)]), dim=1).numpy()[0]
+    img_bytes = uploaded_file.getvalue()
+    image = Image.open(io.BytesIO(img_bytes)).convert('RGB')
+
+    # Apply PII Shield
+    if privacy_shield:
+        img_np = np.array(image)
+        h, w = img_np.shape[:2]
+        cv2.rectangle(img_np, (0, 0), (int(w*0.3), int(h*0.1)), (0, 0, 0), -1) # Top Left
+        cv2.rectangle(img_np, (int(w*0.7), 0), (w, int(h*0.1)), (0, 0, 0), -1) # Top Right
+        image = Image.fromarray(img_np)
+        img_bytes_shielded = io.BytesIO()
+        image.save(img_bytes_shielded, format='JPEG')
+        proc_bytes = img_bytes_shielded.getvalue()
     else:
-        output = engine["model"](input_tensor)
-        probs = F.softmax(output, dim=1).detach().numpy()[0]
-    inf_time = (time.time() - start_time) * 1000
+        proc_bytes = img_bytes
 
-    prediction = int(np.argmax(probs))
-    confidence = float(probs[prediction])
+    import asyncio
+    with st.spinner("INITIATING INFINITY TRIAGE..."):
+        async def analyze():
+            tasks = [call_api_predict(proc_bytes, enhance=enhance_mode)]
+            if show_gcam: tasks.append(call_api_explain(proc_bytes))
+            return await asyncio.gather(*tasks)
 
-    # 3. Side-by-Side Comparison
-    col_raw, col_cam = st.columns(2)
-    
-    with col_raw:
-        st.markdown("<p class='hud-label' style='text-align: center;'>RAW RADIOGRAPH</p>", unsafe_allow_html=True)
-        st.image(image, use_container_width=True)
-        
-    with col_cam:
-        st.markdown("<p class='hud-label' style='text-align: center;'>NEURAL FOCUS (GRAD-CAM)</p>", unsafe_allow_html=True)
-        model_pt = get_pytorch_model()
-        if model_pt:
-            gcam = GradCam(model_pt, model_pt.layer4[-1])
-            heatmap = gcam.generate_heatmap(input_tensor, prediction)
-            gcam.remove_hooks()
-            if heatmap is not None:
-                orig_np = np.array(image.resize((620, 620)))
-                hm = cv2.resize(heatmap, (620, 620))
-                hm_colored = cv2.applyColorMap(np.uint8(255 * hm), cv2.COLORMAP_JET)
-                hm_colored = cv2.cvtColor(hm_colored, cv2.COLOR_BGR2RGB)
-                
-                # Dynamic Opacity Blending
-                overlay = cv2.addWeighted(orig_np, 1 - cam_opacity, hm_colored, cam_opacity, 0)
-                st.image(overlay, use_container_width=True)
+        results = asyncio.run(analyze())
+        predict_res = results[0]
+        explain_res = results[1] if show_gcam else {"status": "disabled"}
+
+    if predict_res.get("status") == "success":
+        prediction = predict_res["prediction"]
+        confidence = predict_res["raw_confidence"]
+        justifications = predict_res["justification"]
+
+        # 1. Visualization
+        if show_gcam:
+            col_raw, col_cam = st.columns(2)
+            with col_raw:
+                st.markdown("<p class='hud-label' style='text-align: center;'>ENHANCED RADIOGRAPH</p>", unsafe_allow_html=True)
+                st.image(image, use_container_width=True)
+            with col_cam:
+                st.markdown("<p class='hud-label' style='text-align: center;'>NEURAL FOCUS (GRAD-CAM)</p>", unsafe_allow_html=True)
+                if explain_res.get("status") == "success":
+                    hm_bytes = base64.b64decode(explain_res["heatmap_base64"])
+                    hm_np = cv2.imdecode(np.frombuffer(hm_bytes, np.uint8), cv2.IMREAD_COLOR)
+                    hm_np = cv2.cvtColor(hm_np, cv2.COLOR_BGR2RGB)
+                    orig_np = np.array(image.resize((224, 224)))
+                    hm_np = cv2.resize(hm_np, (224, 224))
+                    overlay = cv2.addWeighted(orig_np, 1 - cam_opacity, hm_np, cam_opacity, 0)
+                    st.image(overlay, use_container_width=True)
+                else: st.error("CAM Logic Unavailable")
         else:
-            st.warning("Heatmap Engine Offline")
+            st.image(image, use_container_width=True)
 
-    # 4. The Glass Result Banner (The 3-Second Rule)
-    outcome_class = "banner-positive" if prediction == 1 else "banner-normal"
-    headline = "PNEUMONIA DETECTED" if prediction == 1 else "NORMAL FINDINGS"
-    headline_class = "headline-red" if prediction == 1 else "headline-green"
-    
-    st.markdown(f"""
-        <div class='result-banner {outcome_class}'>
-            <h1 class='{headline_class}'>{headline}</h1>
-            <p style='color: #94a3b8; letter-spacing: 3px;'>DIAGNOSTIC CONFIDENCE: {confidence:.2%}</p>
-        </div>
-    """, unsafe_allow_html=True)
+        # 2. Result Ribbon
+        outcome_class = "badge-positive" if prediction == "PNEUMONIA" else "badge-normal"
+        headline_class = "headline-red" if prediction == "PNEUMONIA" else "headline-green"
+        st.markdown(f"""
+            <div class='diagnostic-badge {outcome_class}'>
+                <span class='{headline_class}' style='font-size: 1.2rem; font-weight: 800;'>{prediction}</span>
+                <span style='color: #94a3b8; font-size: 0.75rem; margin-left: 20px; font-family: monospace;'>CONFIDENCE CONSENSUS: {confidence:.2%}</span>
+            </div>
+        """, unsafe_allow_html=True)
 
-    # 5. Justification & Feedback
-    col_just, col_feed = st.columns([2, 1])
-    
-    with col_just:
-        st.markdown("<div class='glass-card'>", unsafe_allow_html=True)
-        st.markdown("<span class='hud-label'>AI CLINICAL RATIONALE</span>", unsafe_allow_html=True)
-        findings = generate_clinical_rationale(prediction, confidence, hash(uploaded_file.name))
-        for f in findings:
-            st.markdown(f"<p style='color: #cbd5e1; border-bottom: 1px solid rgba(255,255,255,0.05); padding: 10px 0;'>• {f}</p>", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-        
-    with col_feed:
-        st.markdown("<div class='glass-card' style='text-align: center;'>", unsafe_allow_html=True)
-        st.markdown("<span class='hud-label'>VALIDATION LOOP</span>", unsafe_allow_html=True)
-        st.button("✅ CONFIRM DIAGNOSIS", use_container_width=True, type="primary")
-        st.button("🚩 FLAG FOR REVIEW", use_container_width=True)
-        st.button("📄 GENERATE PDF REPORT", use_container_width=True)
-        st.markdown("</div>", unsafe_allow_html=True)
+        # 4. Findings & Report
+        col_just, col_feed = st.columns([2, 1])
+        with col_just:
+            st.markdown("<div class='glass-card' style='padding: 12px;'>", unsafe_allow_html=True)
+            st.markdown("<span class='hud-label'>AI CLINICAL RATIONALE</span>", unsafe_allow_html=True)
+            for f in justifications:
+                st.markdown(f"<p style='color: #cbd5e1; font-size: 0.8rem; margin: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.01);'>- {f}</p>", unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
 
-    # 6. Performance HUD Footer
+        with col_feed:
+            st.markdown("<div class='glass-card' style='text-align: center;'>", unsafe_allow_html=True)
+            st.markdown("<span class='hud-label'>CLINICAL DOCUMENTATION</span>", unsafe_allow_html=True)
+            try:
+                if FPDF is None:
+                    st.error("PDF Library Missing - Please Restart App")
+                else:
+                    # Initialize with explicit A4 Geometry
+                    pdf = FPDF(orientation='P', unit='mm', format='A4')
+                    pdf.set_margins(15, 15, 15)
+                    pdf.add_page(); pdf.set_font("Helvetica", "B", 16)
+                    pdf.cell(0, 10, "SENTINEL-Ai V1.0 OFFICIAL CLINICAL SUMMARY", ln=True, align="C"); pdf.ln(10)
+
+                    f_name = str(st.session_state.get("facility", "SENTINEL CENTRAL")).upper()
+                    c_id = str(st.session_state.get("clinician", "STN-77"))
+
+                    pdf.set_font("Helvetica", "", 10)
+                    pdf.cell(0, 10, f"Facility: {f_name}", ln=True)
+                    pdf.cell(0, 10, f"Clinician: {c_id}", ln=True)
+                    pdf.cell(0, 10, f"Outcome: {str(prediction)} ({confidence:.2%})", ln=True)
+                    pdf.ln(10); pdf.set_font("Helvetica", "B", 12); pdf.cell(0, 10, "FINDINGS:", ln=True)
+
+                    pdf.set_font("Helvetica", "", 10)
+                    for f in justifications:
+                        pdf.multi_cell(w=180, h=8, txt=f"- {str(f)}")
+                        pdf.ln(1)
+
+                    # High-Stability Buffer Protocol
+                    pdf_bytes = pdf.output()
+                    if isinstance(pdf_bytes, bytearray):
+                        pdf_bytes = bytes(pdf_bytes)
+                    elif isinstance(pdf_bytes, str):
+                        pdf_bytes = pdf_bytes.encode('latin-1')
+
+                    st.download_button(
+                        label="📄 DOWNLOAD V1 REPORT",
+                        data=pdf_bytes,
+                        file_name=f"Sentinel_Report_V1_{c_id}.pdf",
+                        mime="application/pdf",
+                        use_container_width=True
+                    )
+            except Exception as e:
+                st.error(f"Report Engine Error: {str(e)}")
+                logger.error(f"PDF Error: {e}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
     st.markdown(f"""
         <div style='position: fixed; bottom: 0; width: 100%; background: #030508; padding: 10px; border-top: 1px solid rgba(255,255,255,0.05);'>
-            <span class='hud-label'>INFERENCE LATENCY:</span> <span class='hud-value'>{inf_time:.2f}ms</span>
-            <span style='margin-left: 20px;' class='hud-label'>HARDWARE:</span> <span class='hud-value'>INTEL ACCELERATED</span>
-            <span style='margin-left: 20px;' class='hud-label'>BIAS:</span> <span class='hud-value'>SENSITIVITY FIRST (99.5%)</span>
+            <span class='hud-label'>CORE:</span> <span class='hud-value'>SENTINEL-Ai-v1.0.0</span>
+            <span style='margin-left: 20px;' class='hud-label'>BIAS:</span> <span class='hud-value'>MAX-SENSITIVITY</span>
+            <span style='margin-left: 20px;' class='hud-label'>ENHANCE:</span> <span class='hud-value'>{'CLAHE ACTIVE' if enhance_mode else 'RAW'}</span>
         </div>
     """, unsafe_allow_html=True)
-
 else:
-    # Cinematic Idle State
-    st.markdown("""
-        <div style='text-align: center; margin-top: 150px;'>
-            <h1 style='color: rgba(255,255,255,0.05); font-size: 8rem; font-weight: 800; margin:0;'>SENTINEL</h1>
-            <p style='color: #2d3748; letter-spacing: 15px;'>AWAITING CLINICAL DATA INPUT</p>
-        </div>
-    """, unsafe_allow_html=True)
+    st.markdown("""<div style='text-align: center; margin-top: 150px;'><h1 style='color: rgba(255,255,255,0.03); font-size: 8rem; font-weight: 800; margin:0;'>SENTINEL-Ai</h1><p style='color: #2d3748; letter-spacing: 15px;'>V1.0.0 PRODUCTION RELEASE</p></div>""", unsafe_allow_html=True)
