@@ -197,14 +197,14 @@ st.markdown("""
     
     /* Rationale Bubbles */
     .rationale-bubble {
-        background: #12171f;
-        border-left: 4px solid #00d4ff;
-        padding: 15px 20px;
-        border-radius: 10px;
-        margin-bottom: 12px;
-        font-size: 0.95rem;
-        color: #e0e0e0;
-        box-shadow: 2px 2px 10px rgba(0,0,0,0.2);
+        background: #12171f !important;
+        border-left: 4px solid #00d4ff !important;
+        padding: 15px 20px !important;
+        border-radius: 10px !important;
+        margin-bottom: 12px !important;
+        font-size: 0.95rem !important;
+        color: #e0e0e0 !important;
+        box-shadow: 2px 2px 10px rgba(0,0,0,0.2) !important;
     }
     
     /* Confidence Progress Bar */
@@ -320,9 +320,6 @@ with col2:
                                     st.image(heatmap_img, use_container_width=True, caption="Pathological Focus Area (Grad-CAM)")
         else:
             st.info("Awaiting patient imaging data...")
-
-st.divider()
-st.markdown("<script>lucide.createIcons();</script>", unsafe_allow_html=True)
 
 st.divider()
 st.markdown("<script>lucide.createIcons();</script>", unsafe_allow_html=True)
