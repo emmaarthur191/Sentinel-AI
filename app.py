@@ -1,5 +1,4 @@
 import streamlit as st
-import httpx
 from PIL import Image, ImageFilter
 import io
 import base64
@@ -13,26 +12,34 @@ import random
 import os
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torchvision import models, transforms
-import openvino.runtime as ov
+
+# OpenVINO: Optional — graceful fallback to PyTorch if unavailable
+ov = None
+try:
+    import openvino as ov
+except ImportError:
+    try:
+        import openvino.runtime as ov
+    except ImportError:
+        ov = None
 
 try:
     from fpdf import FPDF
 except ImportError:
     FPDF = None
 
-# SECURITY: Allowlist specific globals for PyTorch 2.4+
+# SECURITY: Allowlist specific globals for PyTorch deserialization
 try:
-    import torch.serialization
-    import _codecs
-    torch.serialization.add_safe_globals([
-        torch._utils._rebuild_device_tensor_from_numpy,
-        np._core.multiarray._reconstruct,
-        np.ndarray,
-        np.dtype,
-        _codecs.encode if '_codecs' in globals() else lambda x: x
-    ])
-except: pass
+    _safe_globals = [np.ndarray, np.dtype]
+    if hasattr(np._core.multiarray, '_reconstruct'):
+        _safe_globals.append(np._core.multiarray._reconstruct)
+    if hasattr(torch._utils, '_rebuild_device_tensor_from_numpy'):
+        _safe_globals.append(torch._utils._rebuild_device_tensor_from_numpy)
+    torch.serialization.add_safe_globals(_safe_globals)
+except Exception:
+    pass
 
 # Configure Logging
 logging.basicConfig(level=logging.INFO)
@@ -47,15 +54,26 @@ PYTORCH_MODEL = "best_pneumonia_model.pth"
 
 @st.cache_resource
 def load_openvino_engine():
-    core = ov.Core()
-    if os.path.exists(MODEL_XML):
-        model = core.read_model(MODEL_XML)
-        return core.compile_model(model, "CPU")
+    """Load OpenVINO compiled model if available."""
+    if ov is None:
+        logger.info("OpenVINO not available — using PyTorch fallback.")
+        return None
+    try:
+        core = ov.Core()
+        if os.path.exists(MODEL_XML):
+            model = core.read_model(MODEL_XML)
+            compiled = core.compile_model(model, "CPU")
+            logger.info("OpenVINO Engine Started Successfully.")
+            return compiled
+    except Exception as e:
+        logger.warning(f"OpenVINO init failed: {e} — falling back to PyTorch.")
     return None
 
 @st.cache_resource
 def load_pytorch_engine():
-    if not os.path.exists(PYTORCH_MODEL): return None
+    """Load PyTorch ResNet50 model for inference and Grad-CAM."""
+    if not os.path.exists(PYTORCH_MODEL):
+        return None
     try:
         model = models.resnet50()
         model.fc = nn.Sequential(
@@ -66,12 +84,14 @@ def load_pytorch_engine():
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         model.load_state_dict(state_dict)
         model.eval()
+        logger.info("PyTorch Engine Started Successfully.")
         return model
     except Exception as e:
-        logging.error(f"PyTorch Load Error: {e}")
+        logger.error(f"PyTorch Load Error: {e}")
         return None
 
 class GradCam:
+    """Grad-CAM visualization engine for explainable diagnostics."""
     def __init__(self, model, target_layer):
         self.model = model
         self.target_layer = target_layer
@@ -82,20 +102,27 @@ class GradCam:
             target_layer.register_full_backward_hook(self.save_gradient)
         ]
 
-    def save_activation(self, module, input, output): self.activations = output
-    def save_gradient(self, module, grad_input, grad_output): self.gradients = grad_output[0]
+    def save_activation(self, module, input, output):
+        self.activations = output
+
+    def save_gradient(self, module, grad_input, grad_output):
+        self.gradients = grad_output[0]
+
     def remove_hooks(self):
-        for h in self.hooks: h.remove()
+        for h in self.hooks:
+            h.remove()
 
     def __call__(self, x):
         self.model.zero_grad()
         output = self.model(x)
         pred_class = output.argmax(dim=1).item()
         output[0, pred_class].backward()
-        if self.gradients is None or self.activations is None: return None
+        if self.gradients is None or self.activations is None:
+            return None
         weights = torch.mean(self.gradients, dim=(2, 3), keepdim=True)
         cam = torch.relu(torch.sum(weights * self.activations, dim=1).squeeze())
-        cam -= torch.min(cam); cam /= (torch.max(cam) + 1e-7)
+        cam -= torch.min(cam)
+        cam /= (torch.max(cam) + 1e-7)
         return cam.detach().numpy()
 
 # ===================== CLINICAL CSS (v1.0 INFINITY) =====================
@@ -128,10 +155,11 @@ st.markdown("""
 
 # ===================== ENGINE HELPERS =====================
 def preprocess_numpy(image_bytes, enhance=False):
+    """Preprocess image bytes into normalized NumPy tensor for inference."""
     img_pil = Image.open(io.BytesIO(image_bytes)).convert('L')
     img_np = np.array(img_pil)
     if enhance:
-        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
         img_np = clahe.apply(img_np)
     img_rgb = cv2.cvtColor(img_np, cv2.COLOR_GRAY2RGB)
     img_resized = cv2.resize(img_rgb, (224, 224))
@@ -142,41 +170,75 @@ def preprocess_numpy(image_bytes, enhance=False):
     img_final = img_norm.transpose(2, 0, 1)
     return np.expand_dims(img_final, 0)
 
-def predict_local(image_bytes, enhance=False):
-    engine = load_openvino_engine()
-    if engine is None: return {"status": "offline"}
-    
-    input_orig = preprocess_numpy(image_bytes, enhance=enhance)
-    input_flip = np.flip(input_orig, axis=3)
-    
-    res_orig = engine([input_orig])[engine.output(0)]
-    res_flip = engine([input_flip])[engine.output(0)]
-    results = (res_orig + res_flip) / 2.0
-    
-    probs = np.exp(results - np.max(results))
-    probs /= probs.sum()
-    
-    prediction = "PNEUMONIA" if np.argmax(probs) == 1 else "NORMAL"
-    confidence = float(np.max(probs))
-
-    # Deterministic Narrative
+def _generate_narrative(image_bytes, prediction, confidence):
+    """Deterministic clinical narrative seeded by image hash."""
     img_hash = int(hashlib.md5(image_bytes).hexdigest(), 16)
     random.seed(img_hash)
-    
+
     if prediction == "PNEUMONIA":
         adj = ["Conclusive", "Dense", "Widespread"] if confidence > 0.9 else ["Subtle", "Focal", "Initial"]
         pool = [
             f"{random.choice(adj)} opacification detected.",
             f"{random.choice(adj)} consolidation in lung fields.",
-            f"Anomalous textural patterns consistent with pneumonia.",
-            f"Observed reduction in pulmonary transparency.",
+            "Anomalous textural patterns consistent with pneumonia.",
+            "Observed reduction in pulmonary transparency.",
             f"Neural focus identified at {confidence:.1%} certainty."
         ]
-        justification = random.sample(pool, 4)
+        return random.sample(pool, 4)
     else:
         pool = ["Clear lung fields.", "Normal markings.", "Well-defined silhouettes.", "No acute consolidation."]
-        justification = random.sample(pool, 3)
-    
+        return random.sample(pool, 3)
+
+def _predict_openvino(image_bytes, enhance=False):
+    """Run TTA inference via OpenVINO compiled model."""
+    engine = load_openvino_engine()
+    if engine is None:
+        return None
+
+    input_orig = preprocess_numpy(image_bytes, enhance=enhance)
+    input_flip = np.flip(input_orig, axis=3).copy()
+
+    res_orig = engine([input_orig])[engine.output(0)]
+    res_flip = engine([input_flip])[engine.output(0)]
+    results = (res_orig + res_flip) / 2.0
+    return results
+
+def _predict_pytorch(image_bytes, enhance=False):
+    """Run TTA inference via PyTorch model (fallback)."""
+    model = load_pytorch_engine()
+    if model is None:
+        return None
+
+    img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    transform = transforms.Compose([
+        transforms.Resize((224, 224)), transforms.ToTensor(),
+        transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+    ])
+    input_tensor = transform(img).unsqueeze(0)
+    input_flip = torch.flip(input_tensor, dims=[3])
+
+    with torch.no_grad():
+        res_orig = model(input_tensor)
+        res_flip = model(input_flip)
+    results = ((res_orig + res_flip) / 2.0).numpy()
+    return results
+
+def predict_local(image_bytes, enhance=False):
+    """Primary prediction pipeline: OpenVINO → PyTorch fallback."""
+    # Try OpenVINO first, then PyTorch
+    results = _predict_openvino(image_bytes, enhance=enhance)
+    if results is None:
+        results = _predict_pytorch(image_bytes, enhance=enhance)
+    if results is None:
+        return {"status": "offline"}
+
+    probs = np.exp(results - np.max(results))
+    probs = probs / probs.sum()
+
+    prediction = "PNEUMONIA" if np.argmax(probs) == 1 else "NORMAL"
+    confidence = float(np.max(probs))
+    justification = _generate_narrative(image_bytes, prediction, confidence)
+
     return {
         "prediction": prediction,
         "confidence": f"{confidence:.2%}",
@@ -186,9 +248,11 @@ def predict_local(image_bytes, enhance=False):
     }
 
 def explain_local(image_bytes):
+    """Generate Grad-CAM heatmap for explainable diagnostics."""
     model = load_pytorch_engine()
-    if model is None: return {"status": "offline"}
-    
+    if model is None:
+        return {"status": "offline"}
+
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     transform = transforms.Compose([
         transforms.Resize((224, 224)), transforms.ToTensor(),
@@ -196,27 +260,30 @@ def explain_local(image_bytes):
     ])
     input_tensor = transform(img).unsqueeze(0)
     input_tensor.requires_grad = True
-    
+
     grad_cam = None
     try:
         target_layer = model.layer4[-1]
         grad_cam = GradCam(model, target_layer)
         cam = grad_cam(input_tensor)
-        if cam is None: return {"status": "failed"}
-        
+        if cam is None:
+            return {"status": "failed"}
+
         cam = cv2.resize(cam, (224, 224))
         hm = cv2.applyColorMap(np.uint8(255 * cam), cv2.COLORMAP_JET)
         hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
         _, buffer = cv2.imencode('.jpg', cv2.cvtColor(hm, cv2.COLOR_RGB2BGR))
         return {"status": "success", "heatmap_base64": base64.b64encode(buffer).decode('utf-8')}
     except Exception as e:
-        logging.error(f"Grad-CAM Error: {e}")
+        logger.error(f"Grad-CAM Error: {e}")
         return {"status": "failed"}
     finally:
-        if grad_cam: grad_cam.remove_hooks()
+        if grad_cam:
+            grad_cam.remove_hooks()
 
 # ===================== SIDEBAR (COMMAND HUB) =====================
-if "reset_counter" not in st.session_state: st.session_state.reset_counter = 0
+if "reset_counter" not in st.session_state:
+    st.session_state.reset_counter = 0
 
 with st.sidebar:
     st.markdown("<h1 style='color: #00d4ff; font-weight: 800; margin:0; font-size: 1.2rem;'>SENTINEL-Ai V1</h1>", unsafe_allow_html=True)
@@ -224,13 +291,17 @@ with st.sidebar:
 
     st.markdown("<p class='hud-label'>🏥 CONFIGURATION</p>", unsafe_allow_html=True)
     c1, c2 = st.columns(2)
-    with c1: facility = st.text_input("Facility", "CENTRAL", key="facility", label_visibility="collapsed")
-    with c2: clinician_id = st.text_input("ID", "STN-77", key="clinician", label_visibility="collapsed")
+    with c1:
+        facility = st.text_input("Facility", "CENTRAL", key="facility", label_visibility="collapsed")
+    with c2:
+        clinician_id = st.text_input("ID", "STN-77", key="clinician", label_visibility="collapsed")
 
     st.markdown("<p class='hud-label'>⚙️ ENGINE CONTROLS</p>", unsafe_allow_html=True)
     e1, e2 = st.columns(2)
-    with e1: enhance_mode = st.toggle("Enhance", value=False)
-    with e2: privacy_shield = st.toggle("Shield", value=True)
+    with e1:
+        enhance_mode = st.toggle("Enhance", value=False)
+    with e2:
+        privacy_shield = st.toggle("Shield", value=True)
     show_gcam = st.toggle("Neural Focus (Grad-CAM)", value=True)
 
     cam_opacity = st.slider("Heatmap Opacity", 0.0, 1.0, 0.6)
@@ -238,7 +309,8 @@ with st.sidebar:
     if st.button("🔄 REBOOT", width="stretch"):
         st.session_state.reset_counter += 1
         for key in list(st.session_state.keys()):
-            if key != "reset_counter": del st.session_state[key]
+            if key != "reset_counter":
+                del st.session_state[key]
         st.rerun()
 
     st.markdown("<div style='border-top: 1px solid rgba(255,255,255,0.05); margin-top: 20px; padding-top: 15px;'>", unsafe_allow_html=True)
@@ -255,7 +327,11 @@ with st.sidebar:
 
 # ===================== MAIN STAGE =====================
 st.markdown("<div class='glass-card' style='margin-bottom: 20px;'>", unsafe_allow_html=True)
-uploaded_file = st.file_uploader("📥 DEPLOY RADIOGRAPH FOR ANALYSIS", type=["jpg","jpeg","png"], key=f"main_{st.session_state.reset_counter}")
+uploaded_file = st.file_uploader(
+    "📥 DEPLOY RADIOGRAPH FOR ANALYSIS",
+    type=["jpg", "jpeg", "png"],
+    key=f"main_{st.session_state.reset_counter}"
+)
 st.markdown("</div>", unsafe_allow_html=True)
 
 if uploaded_file:
@@ -274,8 +350,8 @@ if uploaded_file:
     if privacy_shield:
         img_np = np.array(image)
         h, w = img_np.shape[:2]
-        cv2.rectangle(img_np, (0, 0), (int(w*0.3), int(h*0.1)), (0, 0, 0), -1) # Top Left
-        cv2.rectangle(img_np, (int(w*0.7), 0), (w, int(h*0.1)), (0, 0, 0), -1) # Top Right
+        cv2.rectangle(img_np, (0, 0), (int(w * 0.3), int(h * 0.1)), (0, 0, 0), -1)
+        cv2.rectangle(img_np, (int(w * 0.7), 0), (w, int(h * 0.1)), (0, 0, 0), -1)
         image = Image.fromarray(img_np)
         img_bytes_shielded = io.BytesIO()
         image.save(img_bytes_shielded, format='JPEG')
@@ -308,7 +384,8 @@ if uploaded_file:
                     hm_np = cv2.resize(hm_np, (224, 224))
                     overlay = cv2.addWeighted(orig_np, 1 - cam_opacity, hm_np, cam_opacity, 0)
                     st.image(overlay, width="stretch")
-                else: st.error("CAM Logic Unavailable")
+                else:
+                    st.error("CAM Logic Unavailable")
         else:
             st.image(image, width="stretch")
 
@@ -322,7 +399,7 @@ if uploaded_file:
             </div>
         """, unsafe_allow_html=True)
 
-        # 4. Findings & Report
+        # 3. Findings & Report
         col_just, col_feed = st.columns([2, 1])
         with col_just:
             st.markdown("<div class='glass-card' style='padding: 12px;'>", unsafe_allow_html=True)
@@ -338,32 +415,33 @@ if uploaded_file:
                 if FPDF is None:
                     st.error("PDF Library Missing - Please Restart App")
                 else:
-                    # Initialize with explicit A4 Geometry
                     pdf = FPDF(orientation='P', unit='mm', format='A4')
                     pdf.set_margins(15, 15, 15)
-                    pdf.add_page(); pdf.set_font("Helvetica", "B", 16)
-                    pdf.cell(0, 10, "SENTINEL-Ai V1.0 OFFICIAL CLINICAL SUMMARY", ln=True, align="C"); pdf.ln(10)
+                    pdf.add_page()
+                    pdf.set_font("Helvetica", "B", 16)
+                    pdf.cell(0, 10, text="SENTINEL-Ai V1.0 OFFICIAL CLINICAL SUMMARY", new_x="LMARGIN", new_y="NEXT", align="C")
+                    pdf.ln(10)
 
                     f_name = str(st.session_state.get("facility", "SENTINEL CENTRAL")).upper()
                     c_id = str(st.session_state.get("clinician", "STN-77"))
 
                     pdf.set_font("Helvetica", "", 10)
-                    pdf.cell(0, 10, f"Facility: {f_name}", ln=True)
-                    pdf.cell(0, 10, f"Clinician: {c_id}", ln=True)
-                    pdf.cell(0, 10, f"Outcome: {str(prediction)} ({confidence:.2%})", ln=True)
-                    pdf.ln(10); pdf.set_font("Helvetica", "B", 12); pdf.cell(0, 10, "FINDINGS:", ln=True)
+                    pdf.cell(0, 10, text=f"Facility: {f_name}", new_x="LMARGIN", new_y="NEXT")
+                    pdf.cell(0, 10, text=f"Clinician: {c_id}", new_x="LMARGIN", new_y="NEXT")
+                    pdf.cell(0, 10, text=f"Outcome: {str(prediction)} ({confidence:.2%})", new_x="LMARGIN", new_y="NEXT")
+                    pdf.ln(10)
+                    pdf.set_font("Helvetica", "B", 12)
+                    pdf.cell(0, 10, text="FINDINGS:", new_x="LMARGIN", new_y="NEXT")
 
                     pdf.set_font("Helvetica", "", 10)
                     for f in justifications:
-                        pdf.multi_cell(w=180, h=8, txt=f"- {str(f)}")
+                        pdf.multi_cell(w=180, h=8, text=f"- {str(f)}")
                         pdf.ln(1)
 
-                    # High-Stability Buffer Protocol
+                    # Stable byte-stream output
                     pdf_bytes = pdf.output()
                     if isinstance(pdf_bytes, bytearray):
                         pdf_bytes = bytes(pdf_bytes)
-                    elif isinstance(pdf_bytes, str):
-                        pdf_bytes = pdf_bytes.encode('latin-1')
 
                     st.download_button(
                         label="📄 DOWNLOAD V1 REPORT",
@@ -376,6 +454,9 @@ if uploaded_file:
                 st.error(f"Report Engine Error: {str(e)}")
                 logger.error(f"PDF Error: {e}")
             st.markdown("</div>", unsafe_allow_html=True)
+
+    elif predict_res.get("status") == "offline":
+        st.warning("⚠️ No inference engine available. Ensure model files are present.")
 
     st.markdown(f"""
         <div style='position: fixed; bottom: 0; width: 100%; background: #030508; padding: 10px; border-top: 1px solid rgba(255,255,255,0.05);'>
