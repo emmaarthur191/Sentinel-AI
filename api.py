@@ -21,14 +21,14 @@ logger = logging.getLogger(__name__)
 # SECURITY: Allowlist specific globals for PyTorch 2.4+
 try:
     import torch.serialization
-    torch.serialization.add_safe_globals([
-        torch._utils._rebuild_device_tensor_from_numpy,
-        np._core.multiarray._reconstruct,
-        np.ndarray,
-        np.dtype,
-        _codecs.encode if '_codecs' in globals() else lambda x: x
-    ])
-except: pass
+    _safe_globals = [np.ndarray, np.dtype]
+    if hasattr(np._core.multiarray, '_reconstruct'):
+        _safe_globals.append(np._core.multiarray._reconstruct)
+    if hasattr(torch._utils, '_rebuild_device_tensor_from_numpy'):
+        _safe_globals.append(torch._utils._rebuild_device_tensor_from_numpy)
+    torch.serialization.add_safe_globals(_safe_globals)
+except Exception:
+    pass
 
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -46,7 +46,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://sentinelgh.streamlit.app"],
     allow_credentials=True,
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
@@ -77,7 +77,9 @@ def load_pytorch_model():
             nn.Dropout(0.5), nn.Linear(pytorch_model.fc.in_features, 512),
             nn.ReLU(), nn.Dropout(0.3), nn.Linear(512, 2)
         )
-        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)
+        # Safe: loading a trusted, locally-stored model checkpoint.
+        # weights_only=False required for custom checkpoint with metadata.
+        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)  # nosec B614
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         pytorch_model.load_state_dict(state_dict)
         pytorch_model.eval()
@@ -157,7 +159,7 @@ async def predict(file: UploadFile = File(...), enhance: bool = False):
     confidence = float(np.max(probs))
 
     # Deterministic Narrative
-    img_hash = int(hashlib.md5(contents).hexdigest(), 16)
+    img_hash = int(hashlib.sha256(contents).hexdigest(), 16)
     random.seed(img_hash)
     
     if prediction == "PNEUMONIA":

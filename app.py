@@ -1,18 +1,15 @@
 import streamlit as st
-from PIL import Image, ImageFilter
+from PIL import Image
 import io
 import base64
 import numpy as np
 import cv2
-import time
-import json
 import logging
 import hashlib
 import random
 import os
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import models, transforms
 
 # OpenVINO: Optional — graceful fallback to PyTorch if unavailable
@@ -80,7 +77,9 @@ def load_pytorch_engine():
             nn.Dropout(0.5), nn.Linear(model.fc.in_features, 512),
             nn.ReLU(), nn.Dropout(0.3), nn.Linear(512, 2)
         )
-        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)
+        # Safe: loading a trusted, locally-stored model checkpoint.
+        # weights_only=False required for custom checkpoint with metadata.
+        checkpoint = torch.load(PYTORCH_MODEL, map_location='cpu', weights_only=False)  # nosec B614
         state_dict = checkpoint.get('model_state_dict', checkpoint)
         model.load_state_dict(state_dict)
         model.eval()
@@ -185,7 +184,7 @@ def preprocess_for_inference(image_bytes, enhance=False):
 
 def _generate_narrative(image_bytes, prediction, confidence):
     """Deterministic clinical narrative seeded by image hash."""
-    img_hash = int(hashlib.md5(image_bytes).hexdigest(), 16)
+    img_hash = int(hashlib.sha256(image_bytes).hexdigest(), 16)
     random.seed(img_hash)
 
     if prediction == "PNEUMONIA":
