@@ -1,0 +1,36 @@
+# Python Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv
+venv
+env/
+intel_open_veno/
+coastal_cu_env/
+
+# Large Model Files (Over 100MB)
+# Note: GitHub has a 100MB file limit. Use Git LFS for these or exclude them.
+best_pneumonia_model.pth
+
+# Logs and Scratch
+scratch/
+*.log
+
+# Project Documentation & Masterclass (Excluding from public repo)
+final_project_portfolio.md
+ministry_of_health_ghana_proposal.md
+Sentinel_AI_Masterclass.ipynb
+walkthrough.md
+
+# Local Utility Scripts
+check_checkpoint.py
+check_classes.py
+
+# OS Metadata
+.DS_Store
+Thumbs.db
+
+# Docker
+.docker/
