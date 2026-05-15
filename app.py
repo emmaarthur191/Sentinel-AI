@@ -250,15 +250,14 @@ with col1:
         st.markdown("<div class='section-card'><h2>Imaging Data Input</h2></div>", unsafe_allow_html=True)
         uploaded_file = st.file_uploader("Upload Patient Radiograph", type=["jpg", "jpeg", "png"], label_visibility="collapsed", key="sentinel_primary_uploader")
         
+        # Persistent Visual Slot
+        image_slot = st.empty()
+        
         if uploaded_file:
             image = Image.open(uploaded_file).convert('RGB')
+            # Initialize with original image
+            image_slot.image(image, use_container_width=True, caption="Original Patient Scan")
             show_gradcam = st.toggle("🔍 View Grad-CAM Explainability Overlay", value=True)
-            
-            if show_gradcam:
-                # Grad-CAM logic will handle image display below
-                pass
-            else:
-                st.image(image, use_container_width=True, caption="Original Patient Scan")
 
 with col2:
     with st.container():
@@ -316,8 +315,8 @@ with col2:
                                 heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
                                 overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
                                 heatmap_img = Image.fromarray(overlay)
-                                with col1:
-                                    st.image(heatmap_img, use_container_width=True, caption="Pathological Focus Area (Grad-CAM)")
+                                # Update the slot in the left column
+                                image_slot.image(heatmap_img, use_container_width=True, caption="Pathological Focus Area (Grad-CAM)")
         else:
             st.info("Awaiting patient imaging data...")
 
