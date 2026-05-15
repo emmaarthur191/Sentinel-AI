@@ -108,39 +108,54 @@ class GradCam:
             return None
 
 # --- MODEL LOADING LOGIC ---
+# --- MODEL LOADING LOGIC ---
 @st.cache_resource
-def load_sentinel_model():
-    """Load the best available model version."""
-    # Priority 1: OpenVINO (Production Optimized)
-    if ov and os.path.exists(OPENVINO_MODEL_PATH):
+def get_pytorch_model():
+    """Load and cache the native PyTorch model for Grad-CAM."""
+    if not os.path.exists(MODEL_PATH):
+        return None
+    try:
+        model = models.resnet50(weights=None)
+        num_ftrs = model.fc.in_features
+        model.fc = nn.Linear(num_ftrs, 2)
+        
+        # Security-hardened loading
         try:
-            core = ov.Core()
-            model_ov = core.read_model(OPENVINO_MODEL_PATH)
-            compiled_model = core.compile_model(model_ov, "CPU")
-            logger.info("OpenVINO Engine Started Successfully.")
-            return {"type": "openvino", "model": compiled_model}
-        except Exception as e:
-            logger.warning(f"OpenVINO fallback: {e}")
-
-    # Priority 2: PyTorch (Native)
-    if os.path.exists(MODEL_PATH):
-        try:
-            model = models.resnet50(weights=None)
-            num_ftrs = model.fc.in_features
-            model.fc = nn.Linear(num_ftrs, 2)
+            checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=True)
+            model.load_state_dict(checkpoint)
+        except Exception:
+            checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=False)
+            model.load_state_dict(checkpoint)
             
-            try:
-                checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=True)
-                model.load_state_dict(checkpoint)
-            except Exception:
-                checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=False)
-                model.load_state_dict(checkpoint)
-                
-            model.eval()
-            logger.info("Native PyTorch Engine Started Successfully.")
-            return {"type": "pytorch", "model": model}
-        except Exception as e:
-            logger.error(f"Model Load Failure: {e}")
+        model.eval()
+        return model
+    except Exception as e:
+        logger.error(f"PyTorch Load Failure: {e}")
+        return None
+
+@st.cache_resource
+def get_openvino_model():
+    """Load and cache the OpenVINO model for high-speed inference."""
+    if not (ov and os.path.exists(OPENVINO_MODEL_PATH)):
+        return None
+    try:
+        core = ov.Core()
+        model_ov = core.read_model(OPENVINO_MODEL_PATH)
+        compiled_model = core.compile_model(model_ov, "CPU")
+        return compiled_model
+    except Exception as e:
+        logger.warning(f"OpenVINO Engine Failure: {e}")
+        return None
+
+def load_sentinel_model():
+    """Hybrid loader that prioritizes OpenVINO but ensures PyTorch is ready."""
+    ov_model = get_openvino_model()
+    if ov_model:
+        return {"type": "openvino", "model": ov_model}
+    
+    pt_model = get_pytorch_model()
+    if pt_model:
+        return {"type": "pytorch", "model": pt_model}
     
     return None
 
@@ -227,30 +242,12 @@ with col2:
                 # Grad-CAM if requested
                 heatmap_img = None
                 if show_gradcam:
-                    # Grad-CAM requires PyTorch model
-                    if engine_data["type"] == "openvino":
-                        # For MVP on Streamlit Cloud, we use PyTorch for Grad-CAM even if OpenVINO is main engine
-                        # (We load it once and cache it)
-                        py_model_data = load_sentinel_model() # This would return cached PyTorch if we force it
-                        # Let's just use PyTorch if Grad-CAM is needed
-                        pass
-                    
-                    # Re-load or use PyTorch for Grad-CAM
-                    model_pt = models.resnet50(weights=None)
-                    num_ftrs = model_pt.fc.in_features
-                    model_pt.fc = nn.Linear(num_ftrs, 2)
-                    try:
-                        checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=True)
-                        model_pt.load_state_dict(checkpoint)
-                    except:
-                        checkpoint = torch.load(MODEL_PATH, map_location='cpu', weights_only=False)
-                        model_pt.load_state_dict(checkpoint)
-                    model_pt.eval()
-                    
-                    gcam = GradCam(model_pt, model_pt.layer4[-1])
-                    try:
-                        heatmap = gcam.generate_heatmap(input_tensor, prediction)
-                        gcam.remove_hooks()
+                    model_pt = get_pytorch_model()
+                    if model_pt:
+                        gcam = GradCam(model_pt, model_pt.layer4[-1])
+                        try:
+                            heatmap = gcam.generate_heatmap(input_tensor, prediction)
+                            gcam.remove_hooks()
                         
                         # Apply heatmap to image
                         import cv2
