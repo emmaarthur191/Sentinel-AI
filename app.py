@@ -204,12 +204,13 @@ st.markdown("# <i data-lucide='scan-search' class='lucide-icon' style='width:32p
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.markdown("### <i data-lucide='file-up' class='lucide-icon'></i> Data Input", unsafe_allow_html=True)
-    uploaded_file = st.file_uploader("Upload Patient Radiograph", type=["jpg", "jpeg", "png"], label_visibility="visible", key=f"file_{st.session_state.uploader_key}")
+    st.markdown("### <i data-lucide='file-up' class='lucide-icon'></i> Clinical Imaging Input", unsafe_allow_html=True)
+    uploaded_file = st.file_uploader("Upload Patient Chest Radiograph", type=["jpg", "jpeg", "png"], label_visibility="visible", key="sentinel_primary_uploader")
+    
     if uploaded_file:
         image = Image.open(uploaded_file).convert('RGB')
-        st.image(image, use_container_width=True, caption="Original Scan")
-        show_gradcam = st.toggle("🔍 Enable Grad-CAM Overlay", value=False)
+        st.image(image, use_container_width=True, caption="Active Patient Scan")
+        show_gradcam = st.toggle("🔍 Enable AI Rationale Overlay", value=False)
 
 with col2:
     st.markdown("### <i data-lucide='brain-circuit' class='lucide-icon'></i> Diagnostic Output", unsafe_allow_html=True)
