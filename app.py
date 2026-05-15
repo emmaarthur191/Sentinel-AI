@@ -23,18 +23,32 @@ import datetime
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("Sentinel-AI")
 
-# PyTorch 2.4+ Security Allowlist
-torch.serialization.add_safe_globals([
-    np._core.multiarray._rebuild_tensor,
-    np.core.multiarray._rebuild_tensor,
-    np.dtype,
-    np._core.multiarray.scalar,
-    np.core.multiarray.scalar,
+# --- DYNAMIC SECURITY ALLOWLIST ---
+# This ensures compatibility across different NumPy/PyTorch versions
+safe_globals = [
     torch._utils._rebuild_tensor_v2,
     torch.storage.TypedStorage,
     torch.FloatStorage,
     'collections.OrderedDict'
-])
+]
+
+# Add NumPy internal functions if they exist in the current environment
+for path in [
+    (np, "dtype"),
+    (np, "_core", "multiarray", "_rebuild_tensor"),
+    (np, "core", "multiarray", "_rebuild_tensor"),
+    (np, "_core", "multiarray", "scalar"),
+    (np, "core", "multiarray", "scalar"),
+]:
+    try:
+        obj = path[0]
+        for attr in path[1:]:
+            obj = getattr(obj, attr)
+        safe_globals.append(obj)
+    except AttributeError:
+        continue
+
+torch.serialization.add_safe_globals(safe_globals)
 
 # --- MODEL PATHS ---
 MODEL_PATH = 'best_pneumonia_model.pth'
