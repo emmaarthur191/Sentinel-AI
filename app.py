@@ -248,17 +248,18 @@ with col2:
                         try:
                             heatmap = gcam.generate_heatmap(input_tensor, prediction)
                             gcam.remove_hooks()
-                        
-                        # Apply heatmap to image
-                        import cv2
-                        original_np = np.array(image.resize((224, 224)))
-                        heatmap_resized = cv2.resize(heatmap, (224, 224))
-                        heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
-                        heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-                        overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
-                        heatmap_img = Image.fromarray(overlay)
-                    except Exception as e:
-                        st.warning(f"Grad-CAM error: {e}")
+                            
+                            if heatmap is not None:
+                                # Apply heatmap to image
+                                import cv2
+                                original_np = np.array(image.resize((224, 224)))
+                                heatmap_resized = cv2.resize(heatmap, (224, 224))
+                                heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                                heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+                                overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
+                                heatmap_img = Image.fromarray(overlay)
+                        except Exception as e:
+                            st.warning(f"Grad-CAM generation error: {e}")
 
                 # UI Display
                 label = "PNEUMONIA" if prediction == 1 else "NORMAL"
