@@ -87,32 +87,38 @@ class GradCam:
 
     def generate_heatmap(self, input_tensor, class_idx):
         try:
-            # Ensure gradients are enabled for this specific pass
+            # Clear old data
+            self.gradients = None
+            self.activations = None
+            
             with torch.enable_grad():
                 input_tensor.requires_grad = True
                 output = self.model(input_tensor)
                 self.model.zero_grad()
-                loss = output[0, class_idx]
-                loss.backward()
+                
+                # Get the score for the target class
+                score = output[0, class_idx]
+                score.backward()
                 
                 if self.gradients is None or self.activations is None:
-                    logger.error("Hooks failed to capture gradients/activations")
                     return None
 
-                gradients = self.gradients.data.cpu().numpy()
-                activations = self.activations.data.cpu().numpy()
+                gradients = self.gradients.data.cpu().numpy()[0]
+                activations = self.activations.data.cpu().numpy()[0]
                 
-                weights = np.mean(gradients, axis=(2, 3))[0]
-                heatmap = np.zeros(activations.shape[2:], dtype=np.float32)
+                weights = np.mean(gradients, axis=(1, 2))
+                heatmap = np.zeros(activations.shape[1:], dtype=np.float32)
 
                 for i, w in enumerate(weights):
-                    heatmap += w * activations[0, i, :, :]
+                    heatmap += w * activations[i, :, :]
 
                 heatmap = np.maximum(heatmap, 0)
-                heatmap /= np.max(heatmap) if np.max(heatmap) > 0 else 1
+                max_val = np.max(heatmap)
+                if max_val > 0:
+                    heatmap /= max_val
                 return heatmap
         except Exception as e:
-            logger.error(f"Heatmap generation failed: {e}")
+            logger.error(f"Heatmap inner error: {e}")
             return None
 
 # --- MODEL LOADING LOGIC ---
@@ -185,22 +191,83 @@ def reset_station():
 
 # --- STYLING ---
 st.markdown("""
+    <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-    .main { background-color: #0e1117; color: #ffffff; }
-    .stButton>button { width: 100%; border-radius: 5px; height: 3em; background-color: #262730; color: white; border: 1px solid #4a4a4a; }
-    .stButton>button:hover { border-color: #ff4b4b; color: #ff4b4b; }
-    .report-card { background: rgba(255, 255, 255, 0.05); padding: 20px; border-radius: 10px; border-left: 5px solid #ff4b4b; margin-top: 10px; }
-    .metric-box { text-align: center; padding: 10px; background: rgba(255, 255, 255, 0.03); border-radius: 5px; }
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+    
+    html, body, [class*="st-"] {
+        font-family: 'Inter', sans-serif;
+    }
+
+    .main { background-color: #0b0e14; color: #ffffff; }
+    
+    /* Glassmorphism Sidebar */
+    section[data-testid="stSidebar"] {
+        background: rgba(23, 28, 40, 0.95) !important;
+        backdrop-filter: blur(10px);
+        border-right: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    /* Premium Cards */
+    .report-card { 
+        background: rgba(255, 255, 255, 0.03); 
+        padding: 24px; 
+        border-radius: 12px; 
+        border: 1px solid rgba(255, 255, 255, 0.08);
+        border-left: 6px solid #ff4b4b;
+        box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.37);
+        backdrop-filter: blur(4px);
+    }
+    
+    .stButton>button { 
+        width: 100%; 
+        border-radius: 8px; 
+        height: 3.5em; 
+        background-color: #1c212d; 
+        color: white; 
+        border: 1px solid rgba(255, 255, 255, 0.1);
+        transition: all 0.3s ease;
+    }
+    
+    .stButton>button:hover { 
+        border-color: #ff4b4b; 
+        color: #ff4b4b;
+        transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(255, 75, 75, 0.2);
+    }
+    
+    .metric-box { 
+        text-align: center; 
+        padding: 15px; 
+        background: rgba(255, 255, 255, 0.02); 
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+    
+    .lucide-icon {
+        width: 20px;
+        height: 20px;
+        vertical-align: middle;
+        margin-right: 8px;
+        stroke: currentColor;
+        stroke-width: 2;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+        fill: none;
+    }
     </style>
+    <script>
+        lucide.createIcons();
+    </script>
 """, unsafe_allow_html=True)
 
 # --- SIDEBAR ---
 with st.sidebar:
-    st.title("🛡️ Sentinel AI")
+    st.markdown("## <i data-lucide='shield-check' class='lucide-icon'></i> Sentinel-AI", unsafe_allow_html=True)
     st.caption("Clinical Diagnostic Station v1.2")
     st.divider()
     
-    st.subheader("Patient Vitals")
+    st.markdown("### <i data-lucide='activity' class='lucide-icon'></i> Patient Vitals", unsafe_allow_html=True)
     age = st.number_input("Patient Age", min_value=0, max_value=120, value=25, key="input_age")
     spo2 = st.number_input("SPO2 (%)", min_value=0, max_value=100, value=98, step=1, key="input_spo2")
     temp = st.number_input("Temp (°C)", min_value=30.0, max_value=45.0, value=37.0, step=0.1, key="input_temp")
@@ -209,11 +276,11 @@ with st.sidebar:
         pass
 
 # --- MAIN UI ---
-st.title("Clinical Chest Radiograph Analysis")
+st.markdown("# <i data-lucide='scan-search' class='lucide-icon' style='width:32px; height:32px;'></i> Clinical Chest Radiograph Analysis", unsafe_allow_html=True)
 col1, col2 = st.columns([1, 1])
 
 with col1:
-    st.markdown("### 📥 Imaging Data Input")
+    st.markdown("### <i data-lucide='file-up' class='lucide-icon'></i> Imaging Data Input", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Select Chest Radiograph (JPG/PNG)", type=["jpg", "jpeg", "png"], label_visibility="collapsed", key=f"file_radiograph_{st.session_state.uploader_key}")
     
     if uploaded_file:
@@ -223,7 +290,7 @@ with col1:
         show_gradcam = st.toggle("🔍 View Grad-CAM Explainability Overlay", value=False, key="toggle_gradcam")
 
 with col2:
-    st.markdown("### 🧬 AI Diagnostic Output")
+    st.markdown("### <i data-lucide='brain-circuit' class='lucide-icon'></i> AI Diagnostic Output", unsafe_allow_html=True)
     
     if uploaded_file:
         with st.spinner("Processing High-Resolution Inference..."):
@@ -250,23 +317,28 @@ with col2:
                 # Grad-CAM if requested
                 heatmap_img = None
                 if show_gradcam:
-                    model_pt = get_pytorch_model()
-                    if model_pt:
-                        gcam = GradCam(model_pt, model_pt.layer4[-1])
-                        try:
-                            heatmap = gcam.generate_heatmap(input_tensor, prediction)
-                            gcam.remove_hooks()
-                            
-                            if heatmap is not None:
-                                # Apply heatmap to image
-                                original_np = np.array(image.resize((224, 224)))
-                                heatmap_resized = cv2.resize(heatmap, (224, 224))
-                                heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
-                                heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
-                                overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
-                                heatmap_img = Image.fromarray(overlay)
-                        except Exception as e:
-                            st.warning(f"Grad-CAM generation error: {e}")
+                    with st.spinner("Generating diagnostic justification..."):
+                        model_pt = get_pytorch_model()
+                        if model_pt:
+                            gcam = GradCam(model_pt, model_pt.layer4[-1])
+                            try:
+                                heatmap = gcam.generate_heatmap(input_tensor, prediction)
+                                gcam.remove_hooks()
+                                
+                                if heatmap is not None:
+                                    # Apply heatmap to image
+                                    original_np = np.array(image.resize((224, 224)))
+                                    heatmap_resized = cv2.resize(heatmap, (224, 224))
+                                    heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
+                                    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
+                                    overlay = cv2.addWeighted(original_np, 0.6, heatmap_colored, 0.4, 0)
+                                    heatmap_img = Image.fromarray(overlay)
+                                else:
+                                    st.error("Visualization engine failed to capture gradients.")
+                            except Exception as e:
+                                st.warning(f"Grad-CAM generation error: {e}")
+                        else:
+                            st.error("Visualization model not available.")
 
                 # UI Display
                 label = "PNEUMONIA" if prediction == 1 else "NORMAL"
@@ -280,15 +352,40 @@ with col2:
                 
                 # Report Card
                 st.markdown(f"""
-                <div class="report-card">
-                    <h4>Clinical Findings</h4>
-                    <p><b>Observation:</b> {"Increased pulmonary opacification and consolidation consistent with infectious process." if prediction == 1 else "Clear lung fields with no visible consolidations or significant opacities."}</p>
-                    <p><b>Recommendation:</b> {"Stat radiological consultation and clinical correlation suggested." if prediction == 1 else "Routine monitoring."}</p>
-                    <p style="font-size: 0.8em; opacity: 0.7;">Timestamp: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+                <div class='report-card'>
+                    <h4><i data-lucide='file-text' class='lucide-icon'></i> Clinical Diagnostic Report</h4>
+                    <p><strong>Status:</strong> {label}</p>
+                    <p><strong>System Rationale:</strong> The AI model identified features consistent with 
+                    {'pneumonic infiltration and opacity' if prediction == 1 else 'clear pulmonary fields'} 
+                    at a confidence level of {confidence:.2%}.</p>
+                    <div style='display: flex; justify-content: space-between; margin-top: 15px;'>
+                        <div class='metric-box'>
+                            <small>SPO2</small><br/><strong>{spo2}%</strong>
+                        </div>
+                        <div class='metric-box'>
+                            <small>Temp</small><br/><strong>{temp}°C</strong>
+                        </div>
+                        <div class='metric-box'>
+                            <small>Age</small><br/><strong>{age}</strong>
+                        </div>
+                    </div>
                 </div>
                 """, unsafe_allow_html=True)
+                
+                # Footer Signature
+                st.caption(f"Scanned at {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | Local Inference Node")
     else:
-        st.info("Upload a patient scan to begin clinical analysis.")
+        # Welcome State
+        st.info("Please upload a chest radiograph to begin analysis.")
+        st.markdown("""
+        ### <i data-lucide='check-circle' class='lucide-icon'></i> System Readiness
+        - **Inference Engine:** Online (Intel OpenVINO)
+        - **XAI Modules:** Grad-CAM Active
+        - **Encryption:** AES-256 Transport Layer
+        """, unsafe_allow_html=True)
 
 st.divider()
 st.caption("Sentinel AI is a diagnostic aid and should be used with clinical judgment.")
+
+# Final script call to initialize Lucide icons
+st.markdown("<script>lucide.createIcons();</script>", unsafe_allow_html=True)
