@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: sentinel-ai-api
+    env: docker
+    dockerContext: .
+    dockerfilePath: backend.Dockerfile
+    plan: standard # Note: 'standard' or 'plus' recommended for 1GB+ RAM. Free tier (512MB) may crash.
+    envVars:
+      - key: PORT
+        value: 10000
