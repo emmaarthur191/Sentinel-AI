@@ -204,14 +204,21 @@ def _predict_openvino(image_bytes, enhance=False):
     return results
 
 def _predict_pytorch(image_bytes, enhance=False):
-    """Run TTA inference via PyTorch model (fallback)."""
+    """Run TTA inference via PyTorch model (fallback).
+    
+    Uses the EXACT same preprocessing as the training validation pipeline:
+    Resize(256) → CenterCrop(224) → Normalize (ImageNet stats).
+    """
     model = load_pytorch_engine()
     if model is None:
         return None
 
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+    # MUST match training val/test transforms from pneumonia_predictor.py
     transform = transforms.Compose([
-        transforms.Resize((224, 224)), transforms.ToTensor(),
+        transforms.Resize((256, 256)),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     input_tensor = transform(img).unsqueeze(0)
@@ -255,7 +262,9 @@ def explain_local(image_bytes):
 
     img = Image.open(io.BytesIO(image_bytes)).convert('RGB')
     transform = transforms.Compose([
-        transforms.Resize((224, 224)), transforms.ToTensor(),
+        transforms.Resize((256, 256)),
+        transforms.CenterCrop(224),
+        transforms.ToTensor(),
         transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
     ])
     input_tensor = transform(img).unsqueeze(0)
