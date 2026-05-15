@@ -1,4 +1,4 @@
-# 🛡️ Sentinel AI | Clinical Pneumonia Detection Suite
+# Sentinel AI | Clinical Pneumonia Detection Suite
 
 **Sentinel AI** is an advanced, high-performance radiological diagnostic station designed to bridge the gap between deep learning research and clinical utility. Optimized for **Intel hardware**, it provides real-time detection of pneumonia with exceptional sensitivity and explainable neural rationale.
 
