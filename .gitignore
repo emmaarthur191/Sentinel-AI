@@ -12,7 +12,6 @@ coastal_cu_env/
 
 # Large Model Files (Over 100MB)
 # Note: GitHub has a 100MB file limit. Use Git LFS for these or exclude them.
-best_pneumonia_model.pth
 
 # Logs and Scratch
 scratch/
