@@ -201,7 +201,9 @@ async def explain(file: UploadFile = File(...)):
         hm = cv2.cvtColor(hm, cv2.COLOR_BGR2RGB)
         _, buffer = cv2.imencode('.jpg', cv2.cvtColor(hm, cv2.COLOR_RGB2BGR))
         return {"status": "success", "heatmap_base64": base64.b64encode(buffer).decode('utf-8')}
-    except Exception as e: return JSONResponse(status_code=500, content={"error": str(e)})
+    except Exception as e:
+        logging.exception("Unhandled error in /explain endpoint")
+        return JSONResponse(status_code=500, content={"error": "Internal server error"})
     finally:
         if grad_cam: grad_cam.remove_hooks()
 
